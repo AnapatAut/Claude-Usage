@@ -36,6 +36,7 @@ while IFS= read -r -d '' f; do
 	*) head -n 1 "$f" | grep -qE '^#!.*\b(bash|sh)\b' && scripts+=("$f") ;;
 	esac
 done < <(git ls-files -z)
+[ ${#scripts[@]} -gt 0 ] || { echo "lint: no tracked shell scripts found (not a git checkout?)" >&2; exit 2; }
 bash_syntax() { local f; for f in "${scripts[@]}"; do bash -n "$f" || return 1; done; }
 shellcheck_all() {
 	if command -v shellcheck > /dev/null; then

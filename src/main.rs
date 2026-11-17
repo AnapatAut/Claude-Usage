@@ -109,7 +109,8 @@ fn top_level(flag: &str) -> Command {
 }
 
 /// Writes to stdout. A reader that closed the pipe is not an error (exit 0, no panic); any
-/// other write error (a full disk) is.
+/// other write error (a full disk) is said on stderr, exit 1. (A stdout already closed at
+/// start is not seen: Rust's std treats it as a sink.)
 fn out(text: &str) -> ExitCode {
     let mut stdout = std::io::stdout().lock();
     match stdout
@@ -118,7 +119,10 @@ fn out(text: &str) -> ExitCode {
     {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
+        Err(e) => {
+            err(&format!("claude-usage: cannot write output: {e}\n"));
+            ExitCode::FAILURE
+        }
     }
 }
 

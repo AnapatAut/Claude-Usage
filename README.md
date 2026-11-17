@@ -65,23 +65,20 @@ Everything builds and runs in containers; nothing is installed on the host but D
 ```
 scripts/cargo build --release    # static binary in ./target/release/claude-usage
 scripts/cargo test
+scripts/cargo fetch              # after changing dependencies (the only mode with network)
 tests/lint.sh                    # rustfmt, clippy, bash syntax, shellcheck, privacy check
+tests/cargo-wrapper.sh           # scripts/cargo's own guarantees, against a hostile crate
 tools/install-hooks.sh           # once per clone: privacy hooks for commit and push
 scripts/cargo --down             # remove the build image and the crate cache
 ```
 
-`scripts/cargo` runs each cargo command in a new container: your uid, no network (except
-`fetch`, `generate-lockfile` and `update`, which only return `Cargo.lock`), the source and
-`.git` read-only, and a fresh `CARGO_HOME` every run. See the comment at its top.
-
-## Note on Anthropic's terms
-
-The usage endpoint is not documented by Anthropic and can change or go away without notice;
-`claude-usage` then keeps showing the last numbers with an `error`. Claude Code's
-[legal and compliance](https://code.claude.com/docs/en/legal-and-compliance) page says OAuth
-authentication is designed for ordinary use of Claude Code and Anthropic's own applications.
-`claude-usage` reads only your own token on your own machine, makes no model requests, and only
-reads your usage. Decide for yourself whether that fits your use.
+`scripts/cargo` runs each cargo command in a new container: your uid, no network, the source
+read-only and `.git` hidden, a fresh `CARGO_HOME`, the toolchain pinned, memory and processes
+capped. `fetch`, `generate-lockfile` and `update` get the network but see only the tracked
+`Cargo.toml` and `Cargo.lock` files, and return only `Cargo.lock`. Git dependencies are not
+supported. Build output (`./target`) and the crate cache persist: after building code you do
+not trust, run `scripts/cargo clean` and `scripts/cargo --down`. See the comment at the top of
+`scripts/cargo`.
 
 ## License
 

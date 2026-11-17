@@ -1,2 +1,4 @@
 /target/
 *.tar.gz
+# a temp file of scripts/cargo's network modes, if it was killed
+/.Cargo.lock.*
