@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Fake curl for tests/cli.sh. It never touches the network. Installed as $T/bin/curl, it keeps
+# its records in $T/fake/ (claude-usage clears curl's environment, so the folder comes from its
+# own path):
+#   n                     number of runs; argv.N, env.N, cwd.N, stdin.N, parent-cmdline.N per run
+#   calls                 one line per accepted call: the token
+#   refused               a line per token that is not a test token (then exit 99: a harness
+#                         slip can never hand a real token to anything)
+#   mode                  how to answer (below); retry_after: the Retry-After value for r429
+#   during                if executable, run while the "request" is in flight
+# It answers like `curl -o - -w '\n%{http_code} %header{retry-after}'`: the body, a newline,
+# the status and the header value (empty when absent).
+set -u
+D=$(cd "$(dirname "$0")/.." && pwd)
+F=$D/fake
+n=$(($(cat "$F/n" 2> /dev/null || echo 0) + 1))
+echo "$n" > "$F/n"
+printf '%s\n' "$@" > "$F/argv.$n"
+tr '\0' '\n' < "/proc/$$/environ" > "$F/env.$n" 2> /dev/null
+pwd > "$F/cwd.$n"
+tr '\0' ' ' < "/proc/$PPID/cmdline" > "$F/parent-cmdline.$n" 2> /dev/null
+mode=$(cat "$F/mode" 2> /dev/null || echo ok)
+
+if [ "$mode" = nostdin ]; then
+	tok=SECRET-TOKEN-AAA
+	mode=ok
+else
+	cat > "$F/stdin.$n"
+	tok=$(sed -n 's/^Authorization: Bearer //p' "$F/stdin.$n" | head -n 1)
+fi
+case $tok in
+SECRET-TOKEN-[A-Z][A-Z][A-Z]) ;;
+*)
+	echo "run $n" >> "$F/refused"
+	exit 99
+	;;
+esac
+echo "$tok" >> "$F/calls"
+[ -x "$F/during" ] && "$F/during"
+
+iso() { date -u -d "$1" +%Y-%m-%dT%H:%M:%S.123456+00:00; }
+ok_body() {
+	local p=30.4
+	case $tok in SECRET-TOKEN-BBB) p=80 ;; SECRET-TOKEN-CCC) p=55 ;; esac
+	printf '{"five_hour":{"utilization":%s,"resets_at":"%s"},"seven_day":{"utilization":12,"resets_at":"%s"},"unknown_window":{"utilization":1}}' \
+		"$p" "$(iso '+2 hours')" "$(iso '+3 days')"
+}
+tail_() { printf '\n%s %s' "$1" "$2"; }
+case $mode in
+ok) ok_body && tail_ 200 "" ;;
+slow) sleep 3 && ok_body && tail_ 200 "" ;;
+hang) sleep 60 ;;
+r429) printf '{"error":{"type":"rate_limit_error"}}' && tail_ 429 "$(cat "$F/retry_after" 2> /dev/null)" ;;
+r401) printf '{"error":{"type":"authentication_error"}}' && tail_ 401 "" ;;
+r403) printf '{"error":{"type":"permission_error"}}' && tail_ 403 "" ;;
+r404) printf '{"error":{"type":"not_found_error"}}' && tail_ 404 "" ;;
+r500) printf '{"error":{"type":"api_error"}}' && tail_ 500 "" ;;
+html) printf '<html><body>moved</body></html>' && tail_ 200 "" ;;
+huge) head -c 100000 /dev/zero | tr '\0' a && tail_ 200 "" ;;
+oldcurl) ok_body && printf '\n200 %%header{retry-after}' ;;
+partial)
+	printf '{"five_hour":{"utiliz'
+	exit 28
+	;;
+*)
+	echo "fake curl: unknown mode $mode" >&2
+	exit 98
+	;;
+esac

@@ -68,6 +68,7 @@ scripts/cargo test
 scripts/cargo fetch              # after changing dependencies (the only mode with network)
 tests/lint.sh                    # rustfmt, clippy, bash syntax, shellcheck, privacy check
 tests/cargo-wrapper.sh           # scripts/cargo's own guarantees, against a hostile crate
+tests/cli.sh                     # the contract, black box, against a fake curl (in a container)
 tools/install-hooks.sh           # once per clone: privacy hooks for commit and push
 scripts/cargo --down             # remove the build image and the crate cache
 ```
