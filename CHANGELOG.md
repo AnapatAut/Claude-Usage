@@ -15,10 +15,13 @@
   only a checked `Cargo.lock`. Setup, `--down` and the network modes lock out other runs; the
   image and volume carry labels and are refused when not made by the script.
 - `tests/cargo-wrapper.sh`: replays each of those guarantees against a hostile crate.
-- `tests/cli.sh`: the contract as black-box tests (89 checks in 12 cases: the `get` JSON, the
-  fetch schedule and backoffs, token handling, account switches, config, detaching, `--now`),
-  against a fake curl that refuses any token but a test one. Runs only inside a container with
-  no network, no real curl and no real home. The binary does not pass them yet.
+- `tests/cli.sh`: the contract as black-box tests (175 checks in 13 cases: the `get` JSON, the
+  state file, the fetch schedule and every backoff, token handling, account switches, config
+  and state-folder refusals, curl choice, detaching, `--now`, robustness), against a fake curl
+  that checks its own argument list and refuses any token but a test one. Runs only inside a
+  container with no network, no real curl and no real home; checks the fake before the cases,
+  counts spawned processes by pid, and sweeps every writable folder for the test tokens. The
+  binary does not pass them yet.
 - `tests/lint.sh`: rustfmt, clippy, bash syntax, shellcheck (the installed one, else a pinned
   container), and the privacy check of every tracked file. The privacy rules also refuse
   Tailscale IPv6 addresses, `/root/` and `C:\Users\` paths, JWTs, long bearer tokens and SSH
