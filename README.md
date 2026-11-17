@@ -51,12 +51,28 @@ claude-usage uninstall [--purge]
 - systemd user services for the timer (optional: tools that call `get --refresh` start fetches
   themselves while someone looks).
 
-## Security
+## Security (design; not built yet)
 
-- The OAuth token is read from Claude Code's credentials file at fetch time and given to curl on
-  its standard input: never on a command line, in the environment, a file or a log.
-- `claude-usage` never writes, refreshes or copies Claude Code's credentials.
-- Its own state is owner-only, under `~/.local/state/claude-usage/`.
+- The OAuth token will be read from Claude Code's credentials file at fetch time and given to
+  curl on its standard input: never on a command line, in the environment, a file or a log.
+- `claude-usage` will never write, refresh or copy Claude Code's credentials.
+- Its own state will be owner-only, under `~/.local/state/claude-usage/`.
+
+## Development
+
+Everything builds and runs in containers; nothing is installed on the host but Docker.
+
+```
+scripts/cargo build --release    # static binary in ./target/release/claude-usage
+scripts/cargo test
+tests/lint.sh                    # rustfmt, clippy, bash syntax, shellcheck, privacy check
+tools/install-hooks.sh           # once per clone: privacy hooks for commit and push
+scripts/cargo --down             # remove the build image and the crate cache
+```
+
+`scripts/cargo` runs each cargo command in a new container: your uid, no network (except
+`fetch`, `generate-lockfile` and `update`, which only return `Cargo.lock`), the source and
+`.git` read-only, and a fresh `CARGO_HOME` every run. See the comment at its top.
 
 ## Note on Anthropic's terms
 

@@ -46,23 +46,29 @@ fn parse(args: &[&str]) -> Result<Command, String> {
     let Some((&cmd, rest)) = args.split_first() else {
         return Err("no command given".into());
     };
-    let mut seen: Vec<&str> = Vec::new();
-    for &flag in rest {
-        if seen.contains(&flag) {
-            return Err(format!("{flag} given twice"));
-        }
-        seen.push(flag);
-    }
     let allowed: &[&str] = match cmd {
         "get" => &["--refresh"],
         "fetch" => &["--now"],
         "install" => &["--timer", "--no-timer", "--status"],
         "uninstall" => &["--purge"],
-        "status" | "--help" | "-h" | "--version" => &[],
+        "status" => &[],
+        "--help" | "-h" | "--version" if rest.is_empty() => return Ok(top_level(cmd)),
+        "--help" | "-h" | "--version" => return Err(format!("{cmd} takes no arguments")),
         _ => return Err(format!("unknown command: {cmd}")),
     };
-    if let Some(bad) = seen.iter().find(|f| !allowed.contains(f)) {
-        return Err(format!("{cmd}: unknown option: {bad}"));
+    // Help after any command asks for help, whatever else is given.
+    if rest.iter().any(|&f| f == "--help" || f == "-h") {
+        return Ok(Command::Help);
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for &flag in rest {
+        if !allowed.contains(&flag) {
+            return Err(format!("{cmd}: unknown option: {flag}"));
+        }
+        if seen.contains(&flag) {
+            return Err(format!("{cmd}: {flag} given twice"));
+        }
+        seen.push(flag);
     }
     let has = |f: &str| seen.contains(&f);
     Ok(match cmd {
@@ -90,15 +96,30 @@ fn parse(args: &[&str]) -> Result<Command, String> {
         "uninstall" => Command::Uninstall {
             purge: has("--purge"),
         },
-        "--version" => Command::Version,
-        _ => Command::Help,
+        _ => unreachable!("every command is matched above"),
     })
 }
 
-/// Writes to stdout and ignores a write error (a reader that closed the pipe must not turn
-/// into a panic).
-fn out(text: &str) {
-    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+fn top_level(flag: &str) -> Command {
+    if flag == "--version" {
+        Command::Version
+    } else {
+        Command::Help
+    }
+}
+
+/// Writes to stdout. A reader that closed the pipe is not an error (exit 0, no panic); any
+/// other write error (a full disk) is.
+fn out(text: &str) -> ExitCode {
+    let mut stdout = std::io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(_) => ExitCode::FAILURE,
+    }
 }
 
 fn err(text: &str) {
@@ -119,14 +140,8 @@ fn main() -> ExitCode {
     };
     let args: Vec<&str> = raw.iter().map(String::as_str).collect();
     match parse(&args) {
-        Ok(Command::Help) => {
-            out(USAGE);
-            ExitCode::SUCCESS
-        }
-        Ok(Command::Version) => {
-            out(&format!("claude-usage {}\n", env!("CARGO_PKG_VERSION")));
-            ExitCode::SUCCESS
-        }
+        Ok(Command::Help) => out(USAGE),
+        Ok(Command::Version) => out(&format!("claude-usage {}\n", env!("CARGO_PKG_VERSION"))),
         Ok(cmd) => {
             err(&format!(
                 "claude-usage: {}: not implemented yet\n",
@@ -185,5 +200,23 @@ mod tests {
         assert!(parse(&["install", "--timer", "--no-timer"]).is_err());
         assert!(parse(&["status", "--purge"]).is_err());
         assert!(parse(&["--help", "get"]).is_err());
+    }
+
+    #[test]
+    fn errors_name_the_real_problem() {
+        assert_eq!(
+            parse(&["nope", "--x", "--x"]),
+            Err("unknown command: nope".into())
+        );
+        assert_eq!(
+            parse(&["get", "--x"]),
+            Err("get: unknown option: --x".into())
+        );
+    }
+
+    #[test]
+    fn help_after_a_command() {
+        assert_eq!(parse(&["get", "--help"]), Ok(Command::Help));
+        assert_eq!(parse(&["install", "--timer", "-h"]), Ok(Command::Help));
     }
 }
