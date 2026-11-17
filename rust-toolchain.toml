@@ -1,0 +1,6 @@
+# Exactly the toolchain inside the pinned build image (scripts/cargo): any other spelling, such as
+# "1.99", makes rustup try a download, which fails with the network off.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

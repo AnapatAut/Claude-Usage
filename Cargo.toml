@@ -1,0 +1,17 @@
+[package]
+name = "claude-usage"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+description = "One shared, cached fetcher for Claude usage limits"
+repository = "https://github.com/AnapatAut/Claude-Usage"
+publish = false
+
+[dependencies]
+
+[profile.release]
+panic = "abort"
+strip = true
+lto = true
+codegen-units = 1

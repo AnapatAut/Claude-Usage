@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Run cargo for this repo inside a throwaway container, never on the host.
+#   scripts/cargo <cargo args…>     e.g. scripts/cargo build --release, scripts/cargo test
+#   scripts/cargo --down            remove what this script made: the image and both volumes
+#
+# The image cu-rust:1.99.1 is rust:1.99-alpine, pinned by digest (rustc 1.99.1, musl host, so
+# builds are static), plus rustfmt and clippy. It is made once, with network, by
+# `docker commit` of a one-off container: no build cache is left behind.
+#
+# Every run: the source read-only, target/ and the crate cache in the volumes cu-target and
+# cu-cargo-cache, your uid, no capabilities, no new privileges, a read-only root, no network
+# (cargo offline). Exceptions: `fetch`, `generate-lockfile` and `update` get the network and a
+# writable source (they write Cargo.lock); `fmt` without --check gets a writable source.
+set -euo pipefail
+BASE=rust@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 # rust:1.99-alpine
+TOOLCHAIN=1.99.1-x86_64-unknown-linux-musl
+IMG=cu-rust:1.99.1
+SETUP=cu-rust-setup
+VOLS=(cu-target cu-cargo-cache)
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+die() { echo "scripts/cargo: $*" >&2; exit 2; }
+command -v docker >/dev/null || die "docker not found"
+
+if [ "${1:-}" = --down ]; then
+	docker rm -f "$SETUP" >/dev/null 2>&1 || true
+	docker volume rm -f "${VOLS[@]}" >/dev/null
+	docker image rm -f "$IMG" >/dev/null 2>&1 || true
+	echo "scripts/cargo: removed $IMG and the volumes ${VOLS[*]}"
+	exit 0
+fi
+[ $# -gt 0 ] || die "usage: scripts/cargo <cargo args…> | --down"
+uid=$(id -u) gid=$(id -g)
+[ "$uid" != 0 ] || die "refusing to run as root"
+
+if ! docker image inspect "$IMG" >/dev/null 2>&1; then
+	had=1
+	docker image inspect "$BASE" >/dev/null 2>&1 || had=0
+	docker rm -f "$SETUP" >/dev/null 2>&1 || true
+	echo "scripts/cargo: making $IMG (once; needs network)" >&2
+	docker run --name "$SETUP" "$BASE" rustup component add --toolchain "$TOOLCHAIN" rustfmt clippy >&2
+	docker commit --change 'CMD ["sh"]' "$SETUP" "$IMG" >/dev/null
+	docker rm "$SETUP" >/dev/null
+	# The base was pulled only for this: drop its name (the new image keeps the layers).
+	[ "$had" = 1 ] || docker image rm "$BASE" >/dev/null
+fi
+
+for v in "${VOLS[@]}"; do
+	if ! docker volume inspect "$v" >/dev/null 2>&1; then
+		docker volume create "$v" >/dev/null
+		# A new volume is root's: hand it to the user once.
+		docker run --rm --network none -v "$v:/v" "$IMG" chown "$uid:$gid" /v
+	fi
+done
+
+net=none ro=:ro offline=true
+case $1 in
+fetch | generate-lockfile | update) net=bridge ro= offline=false ;;
+fmt) [[ " $* " == *" --check "* ]] || ro= ;;
+esac
+tty=()
+[ -t 0 ] && [ -t 1 ] && tty=(-t)
+exec docker run --rm "${tty[@]}" --network "$net" --user "$uid:$gid" \
+	--cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
+	-e HOME=/tmp -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -e CARGO_NET_OFFLINE="$offline" \
+	-v "$REPO:/src$ro" -v cu-target:/target -v cu-cargo-cache:/cargo -w /src \
+	"$IMG" cargo "$@"
