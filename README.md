@@ -8,8 +8,9 @@ the OAuth token handling per tool. `claude-usage` is the only program that calls
 Every tool asks it, and every tool works without it.
 
 **Status: under construction.** `get`, `fetch` and `status` work; `install` and `uninstall`
-do not yet (they answer "not implemented"), and there are no systemd units yet. The interface
-below is a draft (`schema: 0`) and may still change.
+do not yet (they answer "not implemented"). The systemd user units are in `systemd/`, to be
+installed by `claude-usage install`. The interface below is a draft (`schema: 0`) and may still
+change.
 
 ## Interface (draft)
 
@@ -77,6 +78,7 @@ scripts/cargo fetch              # after changing dependencies (the only mode wi
 tests/lint.sh                    # rustfmt, clippy, bash syntax, shellcheck, privacy check
 tests/cargo-wrapper.sh           # scripts/cargo's own guarantees, against a hostile crate
 tests/cli.sh                     # the contract, black box, against a fake curl (in a container)
+sandbox/run.sh                   # real systemd, real curl, an HTTPS stand-in (in a container)
 tools/install-hooks.sh           # once per clone: privacy hooks for commit and push
 scripts/cargo --down             # remove the build image and the crate cache
 ```

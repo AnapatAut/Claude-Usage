@@ -1427,6 +1427,25 @@ case_robustness() {
 	rc=$?
 	ok "status runs (exit 0, some output)" '[ "$rc" = 0 ] && [ -s "$T/out.status" ]'
 	ok "status warns: this uid has no passwd entry (the timer's home may differ)" 'grep -q "^warning: .*no passwd entry" "$T/out.status"'
+
+	# The 25 s deadline: a refusal line written to a full pipe nobody reads blocks for ever,
+	# and the parent ignores SIGALRM (inherited across exec). The fetch resets it and dies at
+	# 25 s by SIGALRM (142), well before timeout's 40 s (124). 4096-byte writes are atomic, so
+	# dd stops with the pipe exactly full and the line cannot fit.
+	mkfifo "$T/full"
+	exec 3<> "$T/full"
+	timeout 3 dd if=/dev/zero of="$T/full" bs=4096 2> /dev/null
+	s=$(date +%s)
+	# In a subshell whose own stderr is dropped: bash's "Alarm clock" notice goes there.
+	(
+		CLAUDE_CONFIG_DIR=relative timeout 40 bash -c 'trap "" ALRM; exec "$0" fetch' "$CU" 2>&3
+		echo $? > "$T/rc.deadline"
+	) 2> /dev/null
+	rc=$(cat "$T/rc.deadline")
+	e=$(($(date +%s) - s))
+	exec 3>&-
+	rm -f "$T/full"
+	ok "the 25 s deadline: blocked on a full stderr, SIGALRM ignored by the parent, killed at 25 s" '[ "$rc" = 142 ] && [ "$e" -ge 24 ] && [ "$e" -le 27 ]'
 }
 
 # ---------------------------------------------------------------- run

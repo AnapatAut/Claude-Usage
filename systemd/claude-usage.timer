@@ -1,0 +1,12 @@
+# Starts claude-usage.service at every :00 and :30 of every minute. Installed (and enabled
+# unless `install --no-timer`) by `claude-usage install`.
+[Unit]
+Description=Fetch the Claude usage limits at :00 and :30 (claude-usage)
+Documentation=https://github.com/AnapatAut/Claude-Usage
+
+[Timer]
+OnCalendar=*:*:00,30
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

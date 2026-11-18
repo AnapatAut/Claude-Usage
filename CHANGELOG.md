@@ -11,6 +11,23 @@
   curl and a 25 s deadline on the whole fetch. `get --refresh` starts one detached fetch when
   one is due. `install` and `uninstall` still answer "not implemented".
 - Dependencies: `libc`, `serde` (no derive), `serde_json`, `sha2`.
+- `systemd/claude-usage.service` and `claude-usage.timer`: a user timer at every :00 and :30
+  starting a one-shot `fetch`, with a 30 s start timeout, `LogLevelMax=notice` (routine runs
+  leave no journal line; a refusal's warning stays) and the hardening a user manager can apply
+  (no new privileges, seccomp `@system-service` without `@privileged`,
+  `MemoryDenyWriteExecute`, `UMask=0077`, no namespaces, realtime or SUID, at most 32 tasks
+  and 128 MiB).
+- `sandbox/run.sh`: a throwaway container booting real systemd, with the real curl against an
+  HTTPS stand-in for `api.anthropic.com` on loopback (nginx, HTTP/2, a test CA). Checks the
+  request (one Bearer header, the beta header, HTTP/2), a 429's `Retry-After`, no redirect
+  followed, `~/.curlrc` and `SSLKEYLOGFILE` ignored (with a control), the timer, the hardening
+  as the service's processes get it (a probe against an unhardened unit), readers and the
+  timer at one boundary (one call), `get --refresh` starting a fetch or not (new pids), the
+  journal, every file checked for the test tokens, and what needs
+  root: running as root, credentials, state folder or `usage.json` of another user, a
+  read-only or full state folder. The container has no network but loopback, no mounts, fewer
+  capabilities; its whole HostConfig is compared before it starts. 38 checks, all pass;
+  removes everything it made.
 - `scripts/cargo`: builds, tests and lints in a throwaway container (pinned Rust 1.99.1 on
   Alpine, static musl binary). Build modes: your uid, no network, the source read-only, `.git`
   hidden, a fresh `CARGO_HOME`, the crate cache read-only, the toolchain pinned (a
@@ -21,13 +38,13 @@
   only a checked `Cargo.lock`. Setup, `--down` and the network modes lock out other runs; the
   image and volume carry labels and are refused when not made by the script.
 - `tests/cargo-wrapper.sh`: replays each of those guarantees against a hostile crate.
-- `tests/cli.sh`: the contract as black-box tests (204 checks in 13 cases: the `get` JSON, the
+- `tests/cli.sh`: the contract as black-box tests (205 checks in 13 cases: the `get` JSON, the
   state file, the fetch schedule and every backoff, token handling, account switches, config
   and state-folder refusals, curl choice, detaching, `--now`, robustness), against a fake curl
   that checks its own argument list and refuses any token but a test one. Runs only inside a
   container with no network, no real curl and no real home; checks the fake before the cases,
   counts spawned processes by pid, and sweeps every writable folder for the test tokens. All
-  pass.
+  pass. One check takes 25 s: the deadline ends a fetch blocked on a full stderr pipe.
 - `tests/lint.sh`: rustfmt, clippy, no Debug formatting in `src/` (it could print a credential
   type), bash syntax, shellcheck (the installed one, else a pinned
   container), and the privacy check of every tracked file. The privacy rules also refuse
