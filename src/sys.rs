@@ -42,6 +42,7 @@ pub struct Stat {
     pub mode: libc::mode_t,
     pub rdev: libc::dev_t,
     pub uid: libc::uid_t,
+    pub gid: libc::gid_t,
     pub size: libc::off_t,
     pub mtime: i64,
     pub mtime_ns: i128,
@@ -56,6 +57,7 @@ impl Stat {
             mode: s.st_mode,
             rdev: s.st_rdev,
             uid: s.st_uid,
+            gid: s.st_gid,
             size: s.st_size,
             mtime: s.st_mtime,
             mtime_ns: i128::from(s.st_mtime) * 1_000_000_000 + i128::from(s.st_mtime_nsec),
@@ -73,6 +75,10 @@ impl Stat {
 
     pub fn perm(&self) -> libc::mode_t {
         self.mode & 0o7777
+    }
+
+    pub fn is_symlink(&self) -> bool {
+        self.mode & libc::S_IFMT == libc::S_IFLNK
     }
 }
 
@@ -156,6 +162,41 @@ pub fn unlink_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<()> {
     check(unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), 0) }).map(drop)
 }
 
+/// Removes an empty folder in a folder.
+pub fn rmdir_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<()> {
+    let c = cstring(name)?;
+    // SAFETY: a valid folder fd and a NUL-terminated name.
+    check(unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) }).map(drop)
+}
+
+/// Makes a symlink `name` in a folder, pointing at `target`.
+pub fn symlink_at(target: &Path, dir: BorrowedFd<'_>, name: &str) -> io::Result<()> {
+    let (t, n) = (cstring(target.as_os_str())?, cstring(OsStr::new(name))?);
+    // SAFETY: NUL-terminated strings and a valid folder fd.
+    check(unsafe { libc::symlinkat(t.as_ptr(), dir.as_raw_fd(), n.as_ptr()) }).map(drop)
+}
+
+/// What a symlink in a folder points at.
+pub fn readlink_at(dir: BorrowedFd<'_>, name: &str) -> io::Result<PathBuf> {
+    let c = cstring(OsStr::new(name))?;
+    let mut buf = vec![0u8; 4096];
+    // SAFETY: a valid folder fd, a NUL-terminated name, and a buffer of the given length.
+    let n = unsafe {
+        libc::readlinkat(
+            dir.as_raw_fd(),
+            c.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    let n = usize::try_from(n).map_err(|_| io::Error::last_os_error())?;
+    if n >= buf.len() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    buf.truncate(n);
+    Ok(PathBuf::from(OsString::from_vec(buf)))
+}
+
 pub fn fchmod(fd: BorrowedFd<'_>, mode: libc::mode_t) -> io::Result<()> {
     // SAFETY: a valid fd.
     check(unsafe { libc::fchmod(fd.as_raw_fd(), mode) }).map(drop)
@@ -213,6 +254,11 @@ pub fn euid() -> libc::uid_t {
 pub fn ruid() -> libc::uid_t {
     // SAFETY: no arguments, cannot fail.
     unsafe { libc::getuid() }
+}
+
+pub fn egid() -> libc::gid_t {
+    // SAFETY: no arguments, cannot fail.
+    unsafe { libc::getegid() }
 }
 
 /// At start, for every command: files owner-only, no core dump, not dumpable (no same-user
@@ -317,6 +363,11 @@ pub fn setsid() {
 
 /// The home folder in the passwd entry of `uid`: None when there is no entry.
 pub fn passwd_home(uid: libc::uid_t) -> Option<PathBuf> {
+    passwd_entry(uid).map(|(_, home)| home)
+}
+
+/// The user name and home folder in the passwd entry of `uid`.
+pub fn passwd_entry(uid: libc::uid_t) -> Option<(OsString, PathBuf)> {
     let mut buf = vec![0u8; 16384];
     let mut pw = MaybeUninit::<libc::passwd>::uninit();
     let mut res: *mut libc::passwd = std::ptr::null_mut();
@@ -333,9 +384,17 @@ pub fn passwd_home(uid: libc::uid_t) -> Option<PathBuf> {
     if r != 0 || res.is_null() {
         return None;
     }
-    // SAFETY: res points at pw, filled; pw_dir points into buf, NUL-terminated.
-    let dir = unsafe { CStr::from_ptr((*res).pw_dir) };
-    Some(PathBuf::from(OsStr::from_bytes(dir.to_bytes())))
+    // SAFETY: res points at pw, filled; pw_name and pw_dir point into buf, NUL-terminated.
+    let (name, dir) = unsafe {
+        (
+            CStr::from_ptr((*res).pw_name),
+            CStr::from_ptr((*res).pw_dir),
+        )
+    };
+    Some((
+        OsStr::from_bytes(name.to_bytes()).to_owned(),
+        PathBuf::from(OsStr::from_bytes(dir.to_bytes())),
+    ))
 }
 
 /// Sends SIGKILL to a process group.

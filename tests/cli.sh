@@ -65,6 +65,8 @@ if [ "${CU_IN_CONTAINER:-}" != 1 ]; then
 		--tmpfs "/work:size=512m,exec,mode=0700,uid=$(id -u),gid=$(id -g)" \
 		--tmpfs "/small:size=64k,mode=0700,uid=$(id -u),gid=$(id -g)" \
 		--mount "type=bind,src=$REPO/tests,dst=/src/tests,readonly" \
+		--mount "type=bind,src=$REPO/systemd,dst=/src/systemd,readonly" \
+		--mount "type=bind,src=$REPO/install.sh,dst=/src/install.sh,readonly" \
 		--mount "type=bind,src=$BIN,dst=/opt/cu/claude-usage,readonly" \
 		-e CU_IN_CONTAINER=1 -e CU_ONLY="${CU_ONLY:-}" \
 		"$IMG" bash /src/tests/cli.sh
@@ -1180,9 +1182,15 @@ case_state_folder() {
 case_curl_choice() {
 	reset
 	rm -f "$HOME/.config/claude-usage/config"
-	(cd "$T/decoy" && PATH=.:$T/decoy:$PATH exec "$CU" fetch 2>> "$STDERR")
+	# Each on its own: curl runs in /, so ./curl found first would hide the absolute folder.
+	(cd / && PATH=$T/decoy:$PATH exec "$CU" fetch 2>> "$STDERR")
 	getj
-	ok "curl is never taken from PATH (., a project folder)" '[ ! -e "$T/decoy-ran" ] && [ "$(runs)" = 0 ] && jqg ".error == \"no_curl\""'
+	first=$(jq -r .error <<< "$G"):$(runs):$([ -e "$T/decoy-ran" ] && echo ran)
+	reset
+	rm -f "$HOME/.config/claude-usage/config"
+	(cd "$T/decoy" && PATH=.:$PATH exec "$CU" fetch 2>> "$STDERR")
+	getj
+	ok "curl is never taken from PATH (., a project folder)" '[ ! -e "$T/decoy-ran" ] && [ "$(runs)" = 0 ] && [ "$first" = no_curl:0: ] && jqg ".error == \"no_curl\""'
 
 	reset
 	mkdir -p "$T/xdgc/claude-usage"
@@ -1448,9 +1456,303 @@ case_robustness() {
 	ok "the 25 s deadline: blocked on a full stderr, SIGALRM ignored by the parent, killed at 25 s" '[ "$rc" = 142 ] && [ "$e" -ge 24 ] && [ "$e" -le 27 ]'
 }
 
+# install, install --status, uninstall: the files, the manifest, the refusals. This container
+# has no systemd: the timer is enabled by its link alone (the systemctl paths are the sandbox's).
+I='' UD='' MAN='' VER=''
+sha() { sha256sum < "$1" | cut -d' ' -f1; }
+want_manifest() { # TIMER
+	printf 'claude-usage manifest 1\nversion %s\ntimer %s\nfile bin %s -\nfile service %s -\nfile timer %s -\n' \
+		"$VER" "$1" "$(sha "$CU")" "$(sha /src/systemd/claude-usage.service)" "$(sha /src/systemd/claude-usage.timer)"
+}
+installed() { # TIMER: every file as installed, the manifest exact and finished
+	cmp -s "$CU" "$I" && cmp -s /src/systemd/claude-usage.service "$UD/claude-usage.service" &&
+		cmp -s /src/systemd/claude-usage.timer "$UD/claude-usage.timer" &&
+		[ "$(stat -c %a "$I" "$UD/claude-usage.service" "$UD/claude-usage.timer" "$(dirname "$MAN")" "$MAN" | tr '\n' ' ')" = "700 600 600 700 600 " ] &&
+		[ "$(cat "$MAN")" = "$(want_manifest "$1")" ]
+}
+linked() { [ "$(readlink "$UD/timers.target.wants/claude-usage.timer")" = "$UD/claude-usage.timer" ]; }
+# run CMD…: its stdout in $T/out, stderr in $T/err (and the leak sweep's file), rc.
+rc=''
+run() {
+	"$@" > "$T/out" 2> "$T/err"
+	rc=$?
+	cat "$T/err" >> "$STDERR"
+}
+says() { grep -qF -- "$1" "$T/out" "$T/err"; }
+fresh() { rm -rf "$HOME/.local" "$HOME/.config/systemd" "$T/elsewhere"; }
+cfg_list() { find "$CLAUDE_CONFIG_DIR" -printf '%p %s %T@\n' | sort; }
+
+case_install() {
+	reset
+	I=$HOME/.local/bin/claude-usage UD=$HOME/.config/systemd/user MAN=$HOME/.local/share/claude-usage/manifest
+	VER=$("$CU" --version | cut -d' ' -f2)
+	cfg0=$(cfg_list)
+	run "$CU" install --status
+	ok "install --status before any install: not installed, exit 1" '[ "$rc" = 1 ] && says "not installed"'
+	run "$CU" uninstall
+	ok "uninstall before any install: nothing to do, exit 0, nothing made" '[ "$rc" = 0 ] && says "not installed: nothing to do" && [ ! -e "$HOME/.local" ]'
+
+	run "$CU" install
+	ok "install: exit 0, the program, the units and the manifest (timer on), modes 700/600" '[ "$rc" = 0 ] && installed on'
+	ok "install without systemd: the timer enabled by its link, and said that nothing runs it" 'linked && says "nothing runs it"'
+	ok "install says the Claude-Statusline note" 'says "two calls per 30 s"'
+	ok "install wrote nothing in the Claude config folder" '[ "$(cfg_list)" = "$cfg0" ]'
+	ino=$(stat -c %i "$I" "$UD/claude-usage.service" "$UD/claude-usage.timer" "$MAN" | tr '\n' ' ')
+	run "$CU" install
+	ok "install again: exit 0, files up to date (not rewritten), the manifest the same" \
+		'[ "$rc" = 0 ] && says "files: up to date" && installed on && [ "$(stat -c %i "$I" "$UD/claude-usage.service" "$UD/claude-usage.timer" | tr "\n" " ")" = "${ino% * } " ]'
+	run "$I" get
+	ok "the installed program answers get" '[ "$rc" = 0 ] && jq -e .schema "$T/out" > /dev/null'
+	run "$CU" install --status
+	ok "install --status: healthy, exit 0; whether the timer runs cannot be asked here" '[ "$rc" = 0 ] && says healthy && says "cannot be asked"'
+
+	run "$CU" install --no-timer
+	ok "--no-timer: recorded, the link removed" '[ "$rc" = 0 ] && installed off && [ ! -e "$UD/timers.target.wants/claude-usage.timer" ]'
+	run "$CU" install
+	ok "install again without a flag keeps the timer off" '[ "$rc" = 0 ] && installed off && [ ! -L "$UD/timers.target.wants/claude-usage.timer" ]'
+	run "$CU" install --status
+	ok "install --status with the timer off: healthy" '[ "$rc" = 0 ] && says healthy'
+	ln -s "$UD/claude-usage.timer" "$UD/timers.target.wants/claude-usage.timer"
+	run "$CU" install --status
+	ok "install --status: the timer off but its link there, a problem (exit 4)" '[ "$rc" = 4 ] && says "problem: the timer is off"'
+	run "$CU" install --timer
+	ok "--timer: recorded, linked" '[ "$rc" = 0 ] && installed on && linked'
+	rm "$UD/timers.target.wants/claude-usage.timer"
+	run "$CU" install --status
+	ok "install --status: the timer wanted but not linked, a problem (exit 4)" '[ "$rc" = 4 ] && says "wanted but not enabled"'
+	run "$CU" install
+	ok "install again links it" '[ "$rc" = 0 ] && linked'
+	run "$CU" install --timer --status
+	ok "install --status with another option: usage error, exit 2" '[ "$rc" = 2 ]'
+
+	echo "# mine" >> "$UD/claude-usage.timer"
+	t0=$(sha "$UD/claude-usage.timer") m0=$(sha "$MAN")
+	run "$CU" install --status
+	ok "install --status: a unit changed since the install, a problem naming it (exit 4)" '[ "$rc" = 4 ] && says "problem: ~/.config/systemd/user/claude-usage.timer was changed"'
+	run "$CU" install
+	ok "install: a changed unit is refused (exit 1), kept, the drop-in named, the manifest as it was" \
+		'[ "$rc" = 1 ] && says "claude-usage.timer.d/" && [ "$(sha "$UD/claude-usage.timer")" = "$t0" ] && [ "$(sha "$MAN")" = "$m0" ]'
+	cp /src/systemd/claude-usage.timer "$UD/claude-usage.timer"
+	printf 'old program\n' > "$I"
+	run "$CU" install
+	ok "install: a changed program is refused too" '[ "$rc" = 1 ] && says "claude-usage was changed since the install"'
+	cp "$CU" "$I"
+	touch "$UD/.claude-usage.service.cu-abcdef" "$HOME/.local/bin/.claude-usage.cu-zz9zz9" "$UD/.other.cu-abcdef"
+	run "$CU" install
+	ok "install removes temp files a killed run left (its own names only)" \
+		'[ "$rc" = 0 ] && [ ! -e "$UD/.claude-usage.service.cu-abcdef" ] && [ ! -e "$HOME/.local/bin/.claude-usage.cu-zz9zz9" ] && [ -e "$UD/.other.cu-abcdef" ]'
+	rm -f "$UD/.other.cu-abcdef"
+
+	# The lock: one install or uninstall at a time.
+	flock -o "$(dirname "$MAN")" sleep 30 &
+	lk=$!
+	wait_for 'flock -n -o "$(dirname "$MAN")" true; [ $? = 1 ]' 5
+	run "$CU" install
+	r1=$rc
+	run "$CU" uninstall
+	r2=$rc
+	run "$CU" install --status
+	r3=$rc
+	unlock "$lk"
+	ok "while another run holds the lock: install and uninstall refused (exit 1), status says so (exit 4)" \
+		'[ "$r1" = 1 ] && [ "$r2" = 1 ] && [ "$r3" = 4 ] && says "an install or uninstall is running" && installed on'
+
+	# What is not claude-usage's is never written over or removed.
+	fresh
+	mkdir -p "$HOME/.local/bin" && printf 'another program\n' > "$I"
+	run "$CU" install
+	ok "install: another program at its path, refused (exit 1), nothing written" \
+		'[ "$rc" = 1 ] && says "is there and not claude-usage" && [ "$(cat "$I")" = "another program" ] && [ ! -e "$MAN" ] && [ ! -e "$UD/claude-usage.service" ]'
+	[ ! -e "$HOME/.local/share" ] && [ ! -e "$HOME/.config/systemd" ] && none1=1 || none1=0
+	cp "$CU" "$I"
+	run "$CU" install
+	ok "install: the same program already there (no manifest, mode 755) is taken as its own, mode 700" '[ "$rc" = 0 ] && installed on'
+	fresh
+	mkdir -p "$UD" "$T/elsewhere" && echo keep > "$T/elsewhere/unit" && ln -s "$T/elsewhere/unit" "$UD/claude-usage.service"
+	run "$CU" install
+	ok "install: a symlink at a unit path, refused, its target untouched, nothing written" \
+		'[ "$rc" = 1 ] && says "symbolic link" && [ "$(cat "$T/elsewhere/unit")" = keep ] && [ ! -e "$I" ] && [ ! -e "$MAN" ]'
+	ok "a refused install leaves no folder behind (none made before the checks)" '[ "$none1" = 1 ] && [ ! -e "$HOME/.local" ]'
+	fresh
+	mkdir -p "$UD/timers.target.wants" "$T/elsewhere" && cp /src/systemd/claude-usage.timer "$T/elsewhere/"
+	ln -s "$T/elsewhere/claude-usage.timer" "$UD/timers.target.wants/claude-usage.timer"
+	run "$CU" install
+	ok "install: a link to a claude-usage.timer in another folder at the timer's link, refused" '[ "$rc" = 1 ] && says "not the timer'"'"'s link" && [ ! -e "$MAN" ]'
+	fresh
+	mkdir -p "$T/elsewhere/config" && chmod 700 "$T/elsewhere" "$T/elsewhere/config"
+	mv "$HOME/.config/claude-usage" "$T/elsewhere/config/" && rmdir "$HOME/.config" && ln -s "$T/elsewhere/config" "$HOME/.config"
+	run "$CU" install
+	ok "install: a symlinked ~/.config (dotfiles) is followed" '[ "$rc" = 0 ] && installed on && [ -f "$T/elsewhere/config/systemd/user/claude-usage.timer" ] && linked'
+	run "$CU" install --status
+	ok "install --status through it: healthy" '[ "$rc" = 0 ]'
+	run "$CU" uninstall
+	ok "uninstall through it: the units and the link removed" '[ "$rc" = 0 ] && [ ! -e "$T/elsewhere/config/systemd/user/claude-usage.timer" ] && [ ! -L "$UD/timers.target.wants/claude-usage.timer" ]'
+	rm "$HOME/.config" && mv "$T/elsewhere/config" "$HOME/.config"
+	fresh
+	mkdir -p "$HOME/.local/bin" && chmod 757 "$HOME/.local/bin"
+	run "$CU" install
+	ok "install: a ~/.local/bin others can write, refused, nothing written" '[ "$rc" = 1 ] && says "only you can write" && [ ! -e "$MAN" ] && [ ! -e "$I" ]'
+	chmod 775 "$HOME/.local/bin"
+	run "$CU" install
+	ok "install: group-writable for your own group only (private groups), accepted" '[ "$rc" = 0 ] && installed on'
+	fresh
+	mkdir -p "$HOME/.local/share" "$T/elsewhere/share" && ln -s "$T/elsewhere/share" "$HOME/.local/share/claude-usage"
+	run "$CU" install
+	ok "install: the manifest's folder a symlink, refused, nothing written" '[ "$rc" = 1 ] && [ -z "$(ls -A "$T/elsewhere/share")" ] && [ ! -e "$I" ]'
+	fresh
+	mkdir -p "$HOME/.local/share/claude-usage" && printf 'claude-usage manifest 1\nfile bin /etc/passwd\n' > "$MAN"
+	run "$CU" install
+	r1=$rc
+	run "$CU" uninstall
+	ok "a manifest it did not write: install and uninstall refuse (exit 1), it stays" \
+		'[ "$r1" = 1 ] && [ "$rc" = 1 ] && says "not one claude-usage wrote" && [ -e "$MAN" ] && [ ! -e "$I" ]'
+	run env HOME=/ "$CU" install
+	ok "install with a HOME not yours: refused (exit 1)" '[ "$rc" = 1 ] && says "HOME is not a folder of yours"'
+
+	# A run that stopped part-way is finished by the next.
+	fresh
+	mkdir -p "$HOME/.local/bin" "$HOME/.local/share/claude-usage" && printf 'old program\n' > "$I"
+	printf 'claude-usage manifest 1\nversion 0.0.0\ntimer off\npending install\nfile bin %s %s\nfile service %s -\nfile timer %s -\n' \
+		"$(sha "$CU")" "$(sha "$I")" "$(sha /src/systemd/claude-usage.service)" "$(sha /src/systemd/claude-usage.timer)" > "$MAN"
+	run "$CU" install
+	ok "an install stopped part-way (the old program still there, no units): the next finishes it, keeping its timer choice" \
+		'[ "$rc" = 0 ] && installed off'
+	# Kills at points 0 to 4 ms in (0.1 ms apart, round and round), until enough of them landed
+	# mid-run (or 400 tries). The delay is bash's own read -t on a FIFO nobody writes: a forked
+	# sleep takes as long as a whole install (about 3 ms here).
+	mkfifo "$T/never"
+	exec 5<> "$T/never"
+	hits=0 good=1 n=0
+	while [ "$n" -lt 41 ] || { [ "$hits" -lt 3 ] && [ "$n" -lt 400 ]; }; do
+		d=$(printf '0.%04d' $((n % 41)))
+		n=$((n + 1))
+		fresh
+		"$CU" install > /dev/null 2>> "$STDERR" &
+		p=$!
+		read -rt "$d" -u 5 _
+		kill -9 "$p" 2> /dev/null
+		wait "$p" 2> /dev/null
+		grep -q '^pending install' "$MAN" 2> /dev/null && hits=$((hits + 1))
+		run "$CU" install
+		{ [ "$rc" = 0 ] && installed on && [ -z "$(find "$HOME/.local" "$UD" -name '.*.cu-*')" ]; } || good=0
+	done
+	echo "  info  SIGKILL mid-install: $n tries, $hits landed mid-run"
+	ok "SIGKILL mid-install (at least 3 landed mid-run): the next install finishes it, no temp file left" '[ "$good" = 1 ] && [ "$hits" -ge 3 ]'
+	# An upgrade that stops after its new program is written (the unit folder read-only), then
+	# the earlier release installed again (a rollback by hand): the pending manifest, written
+	# first, counts the new program as claude-usage's. The new program: this one with a byte
+	# appended (an ELF file runs with trailing data).
+	cp "$CU" "$T/cu2" && printf x >> "$T/cu2" && chmod 755 "$T/cu2"
+	fresh
+	run "$CU" install
+	rm "$UD/claude-usage.service" && chmod 500 "$UD"
+	run "$T/cu2" install
+	r1=$rc
+	chmod 700 "$UD"
+	ok "an upgrade that cannot write a unit: stopped part-way (exit 3), the new program in place, the manifest pending" \
+		'[ "$r1" = 3 ] && says "stopped part-way" && cmp -s "$T/cu2" "$I" && grep -qx "pending install" "$MAN"'
+	run "$CU" install
+	ok "then the earlier release installs over it" '[ "$rc" = 0 ] && installed on'
+	# The same with kills, until some leave the new program with the manifest pending.
+	hits=0 good=1 n=0
+	while [ "$n" -lt 41 ] || { [ "$hits" -lt 2 ] && [ "$n" -lt 400 ]; }; do
+		d=$(printf '0.%04d' $((n % 41)))
+		n=$((n + 1))
+		fresh
+		run "$CU" install
+		"$T/cu2" install > /dev/null 2>> "$STDERR" &
+		p=$!
+		read -rt "$d" -u 5 _
+		kill -9 "$p" 2> /dev/null
+		wait "$p" 2> /dev/null
+		cmp -s "$T/cu2" "$I" && grep -q '^pending install' "$MAN" && hits=$((hits + 1))
+		run "$CU" install
+		{ [ "$rc" = 0 ] && installed on; } || good=0
+	done
+	echo "  info  an upgrade killed part-way: $n tries, $hits with the new program in and the manifest pending"
+	ok "an upgrade killed part-way (at least 2 with the new program in, the manifest pending): the earlier release installs over it" \
+		'[ "$good" = 1 ] && [ "$hits" -ge 2 ]'
+	exec 5>&-
+	rm -f "$T/never"
+
+	# uninstall
+	cu fetch
+	run "$CU" uninstall
+	ok "uninstall: the program, the units, the link, the manifest and its folder removed; the state kept" \
+		'[ "$rc" = 0 ] && [ ! -e "$I" ] && [ ! -e "$UD/claude-usage.service" ] && [ ! -e "$UD/claude-usage.timer" ] && [ ! -L "$UD/timers.target.wants/claude-usage.timer" ] && [ ! -e "$HOME/.local/share/claude-usage" ] && [ -f "$(SD)/usage.json" ]'
+	ok "uninstall wrote nothing in the Claude config folder" '[ "$(cfg_list)" = "$cfg0" ]'
+	run "$CU" install
+	echo "# mine" >> "$UD/claude-usage.service"
+	mkdir "$UD/claude-usage.service.d" && echo '[Service]' > "$UD/claude-usage.service.d/x.conf"
+	run "$CU" uninstall
+	ok "uninstall keeps a changed unit and your drop-in, and says so" \
+		'[ "$rc" = 0 ] && says "kept ~/.config/systemd/user/claude-usage.service: changed" && says "kept ~/.config/systemd/user/claude-usage.service.d/" && [ -f "$UD/claude-usage.service.d/x.conf" ] && [ ! -e "$I" ]'
+	rm -rf "$UD/claude-usage.service" "$UD/claude-usage.service.d"
+	run "$CU" install
+	mkdir -p "$HOME/.local/share/claude-usage"
+	sed -i 's/^timer on$/timer on\npending uninstall/' "$MAN"
+	run "$CU" install
+	ok "install while an uninstall is unfinished: refused (exit 1)" '[ "$rc" = 1 ] && says "uninstall is unfinished"'
+	run "$CU" uninstall
+	ok "uninstall again finishes it" '[ "$rc" = 0 ] && [ ! -e "$MAN" ] && [ ! -e "$I" ]'
+
+	# uninstall and running fetches: it waits for their locks, 15 s at most.
+	run "$CU" install
+	flock -o "$(SD)/.lock" sleep 3 &
+	lk=$!
+	wait_for 'flock -n -o "$(SD)/.lock" true; [ $? = 1 ]' 5
+	s=$(date +%s)
+	run "$CU" uninstall
+	e=$(($(date +%s) - s))
+	unlock "$lk"
+	ok "uninstall waits for a fetch holding a state lock, then finishes" '[ "$rc" = 0 ] && [ "$e" -ge 2 ] && [ ! -e "$MAN" ]'
+	run "$CU" install
+	flock -o "$(SD)/.lock" sleep 40 &
+	lk=$!
+	wait_for 'flock -n -o "$(SD)/.lock" true; [ $? = 1 ]' 5
+	s=$(date +%s)
+	run "$CU" uninstall
+	e=$(($(date +%s) - s))
+	ok "a lock held past 15 s: uninstall stops (exit 3), the program gone, the units and the pending manifest kept" \
+		'[ "$rc" = 3 ] && [ "$e" -ge 14 ] && [ "$e" -le 20 ] && [ ! -e "$I" ] && [ -e "$UD/claude-usage.timer" ] && grep -qx "pending uninstall" "$MAN" && says "release"'
+	unlock "$lk"
+	run "$CU" uninstall
+	ok "uninstall again (from the release's copy) finishes it" '[ "$rc" = 0 ] && [ ! -e "$MAN" ] && [ ! -e "$UD/claude-usage.timer" ]'
+
+	# --purge
+	run "$CU" install
+	touch "$HOME/.local/state/claude-usage/notes.txt"
+	run "$CU" uninstall --purge
+	ok "uninstall --purge with a file of another kind in the state folder: refused (exit 1), nothing removed" \
+		'[ "$rc" = 1 ] && says "notes.txt is not claude-usage" && [ -e "$MAN" ] && [ -e "$I" ] && [ -f "$(SD)/usage.json" ]'
+	rm "$HOME/.local/state/claude-usage/notes.txt"
+	echo state_unusable > "$HOME/.local/state/claude-usage/$(basename "$(SD)").refused"
+	touch "$(SD)/.usage.json.AbC123"
+	run "$CU" uninstall --purge
+	ok "uninstall --purge: everything removed, the state folder too (its notes and temp files)" \
+		'[ "$rc" = 0 ] && [ ! -e "$HOME/.local/state/claude-usage" ] && [ ! -e "$MAN" ] && [ ! -e "$I" ] && [ -z "$(find "$HOME/.local" -type f)" ]'
+	ok "uninstall --purge left the credentials and the config folder as they were" '[ "$(cfg_list)" = "$cfg0" ]'
+	cu fetch
+	run "$CU" uninstall --purge
+	ok "uninstall --purge with nothing installed: the state removed" '[ "$rc" = 0 ] && [ ! -e "$HOME/.local/state/claude-usage" ]'
+
+	# install.sh, from the release folder, run from elsewhere.
+	fresh
+	rm -rf "$T/rel"
+	mkdir -p "$T/rel" && cp "$CU" /src/install.sh "$T/rel/" && (cd "$T/rel" && sha256sum claude-usage install.sh > SHA256SUMS)
+	(cd / && "$T/rel/install.sh" --no-timer) > "$T/out" 2> "$T/err"
+	rc=$?
+	ok "install.sh run from another folder: checks the sums, installs, passes --no-timer on" '[ "$rc" = 0 ] && installed off'
+	fresh
+	printf 'x' >> "$T/rel/claude-usage"
+	(cd / && "$T/rel/install.sh") > "$T/out" 2> "$T/err"
+	rc=$?
+	ok "install.sh with a file that does not match SHA256SUMS: refused, nothing installed" '[ "$rc" = 1 ] && says "do not match" && [ ! -e "$HOME/.local" ]'
+}
+
 # ---------------------------------------------------------------- run
 all=(contract fetch_success rate_limited auth_errors http_errors credentials accounts config
-	state_folder curl_choice refresh now robustness)
+	state_folder curl_choice refresh now robustness install)
 sel=("${all[@]}")
 if [ -n "${CU_ONLY:-}" ]; then
 	IFS=, read -r -a sel <<< "$CU_ONLY"

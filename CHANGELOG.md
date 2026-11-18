@@ -9,7 +9,20 @@
   a 5 s floor, the 429, 401/403, 5xx and other-error backoffs, `--now` within its limits, one
   fetch at a time per config folder, the attempt recorded before the call, a 10 s watchdog on
   curl and a 25 s deadline on the whole fetch. `get --refresh` starts one detached fetch when
-  one is due. `install` and `uninstall` still answer "not implemented".
+  one is due.
+- `install [--timer|--no-timer]`, `install --status` and `uninstall [--purge]`, for the user who
+  runs them (root refused): `~/.local/bin/claude-usage`, the two user units and a manifest of
+  each file's sha256 in `~/.local/share/claude-usage/`. dpkg style: the manifest is written
+  first and marked pending, every file atomically, no rollback; a rerun finishes a run that
+  stopped. A file at one of its paths that is not its own (another program's, a unit changed
+  since the install, a symlink) is refused before anything is written, and kept by uninstall.
+  The timer is enabled through `systemctl --user` (from `/usr/bin` or `/bin`, empty
+  environment, 60 s timeout), or by its link when no user manager runs; the `--no-timer`
+  choice is kept across reruns and upgrades. Uninstall stops the timer, removes the program,
+  waits up to 15 s for running fetches, then removes the units and the manifest; `--purge`
+  also removes the state, only when it holds nothing but claude-usage's files.
+- `install.sh` (in the release tarball): Linux x86_64 only, not as root, `SHA256SUMS` checked,
+  then `claude-usage install`. `scripts/tarball.sh` makes the tarball, reproducibly.
 - Dependencies: `libc`, `serde` (no derive), `serde_json`, `sha2`.
 - `systemd/claude-usage.service` and `claude-usage.timer`: a user timer at every :00 and :30
   starting a one-shot `fetch`, with a 30 s start timeout, `LogLevelMax=notice` (routine runs
@@ -25,9 +38,13 @@
   timer at one boundary (one call), `get --refresh` starting a fetch or not (new pids), the
   journal, every file checked for the test tokens, and what needs
   root: running as root, credentials, state folder or `usage.json` of another user, a
-  read-only or full state folder. The container has no network but loopback, no mounts, fewer
-  capabilities; its whole HostConfig is compared before it starts. 38 checks, all pass;
-  removes everything it made.
+  read-only or full state folder. It installs from a real tarball with `install.sh` and checks
+  root refused, `--timer`/`--no-timer` through systemctl, an upgrade keeping the timer choice,
+  kills mid-install, a user without a user manager (the timer starts once linger is on), and
+  `uninstall --purge` during a running fetch with readers racing it, leaving exactly the files
+  that were there before. The container has no network but loopback, no mounts, fewer
+  capabilities; its whole HostConfig is compared before it starts. 53 checks, all
+  pass; removes everything it made.
 - `scripts/cargo`: builds, tests and lints in a throwaway container (pinned Rust 1.99.1 on
   Alpine, static musl binary). Build modes: your uid, no network, the source read-only, `.git`
   hidden, a fresh `CARGO_HOME`, the crate cache read-only, the toolchain pinned (a
@@ -38,9 +55,13 @@
   only a checked `Cargo.lock`. Setup, `--down` and the network modes lock out other runs; the
   image and volume carry labels and are refused when not made by the script.
 - `tests/cargo-wrapper.sh`: replays each of those guarantees against a hostile crate.
-- `tests/cli.sh`: the contract as black-box tests (205 checks in 13 cases: the `get` JSON, the
+- `tests/mutate.sh` and `tests/mutants.txt`: each of 45 safeguards broken once, in a copy
+  of the working tree; the check that names it must fail (not merely any check). A safeguard
+  of two layers (a file's mode at open and the umask) is broken in both. All 45 caught.
+- `tests/cli.sh`: the contract as black-box tests (259 checks in 14 cases: the `get` JSON, the
   state file, the fetch schedule and every backoff, token handling, account switches, config
-  and state-folder refusals, curl choice, detaching, `--now`, robustness), against a fake curl
+  and state-folder refusals, curl choice, detaching, `--now`, robustness, install and
+  uninstall), against a fake curl
   that checks its own argument list and refuses any token but a test one. Runs only inside a
   container with no network, no real curl and no real home; checks the fake before the cases,
   counts spawned processes by pid, and sweeps every writable folder for the test tokens. All

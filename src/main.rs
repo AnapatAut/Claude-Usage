@@ -1,7 +1,4 @@
 //! claude-usage: one shared, cached fetcher for Claude usage limits.
-//!
-//! `get`, `fetch` and `status` are built; `install` and `uninstall` still answer "not
-//! implemented".
 
 mod config;
 mod creds;
@@ -9,6 +6,7 @@ mod curl;
 mod detach;
 mod fetch;
 mod get;
+mod install;
 mod lock;
 mod parse;
 mod paths;
@@ -41,20 +39,6 @@ enum Command {
     Uninstall { purge: bool },
     Help,
     Version,
-}
-
-impl Command {
-    fn name(&self) -> &'static str {
-        match self {
-            Command::Get { .. } => "get",
-            Command::Fetch { .. } => "fetch",
-            Command::Status => "status",
-            Command::Install { .. } => "install",
-            Command::Uninstall { .. } => "uninstall",
-            Command::Help => "--help",
-            Command::Version => "--version",
-        }
-    }
 }
 
 /// Parses the arguments after the program name. Each flag may appear once, and only with its
@@ -97,6 +81,9 @@ fn parse(args: &[&str]) -> Result<Command, String> {
         "install" => {
             if has("--timer") && has("--no-timer") {
                 return Err("install: --timer and --no-timer exclude each other".into());
+            }
+            if has("--status") && (has("--timer") || has("--no-timer")) {
+                return Err("install: --status takes no other option".into());
             }
             let timer = if has("--timer") {
                 Some(true)
@@ -176,13 +163,9 @@ fn main() -> ExitCode {
         Ok(Command::Get { refresh }) => ExitCode::from(get::run(refresh)),
         Ok(Command::Fetch { now }) => ExitCode::from(fetch::run(now)),
         Ok(Command::Status) => ExitCode::from(status::run()),
-        Ok(cmd) => {
-            err(&format!(
-                "claude-usage: {}: not implemented yet\n",
-                cmd.name()
-            ));
-            ExitCode::from(2)
-        }
+        Ok(Command::Install { status: true, .. }) => ExitCode::from(install::status()),
+        Ok(Command::Install { timer, .. }) => ExitCode::from(install::install(timer)),
+        Ok(Command::Uninstall { purge }) => ExitCode::from(install::uninstall(purge)),
         Err(msg) => {
             err(&format!("claude-usage: {msg}\n{USAGE}"));
             ExitCode::from(2)
@@ -204,9 +187,16 @@ mod tests {
         assert_eq!(parse(&["fetch", "--now"]), Ok(Command::Fetch { now: true }));
         assert_eq!(parse(&["status"]), Ok(Command::Status));
         assert_eq!(
-            parse(&["install", "--no-timer", "--status"]),
+            parse(&["install", "--no-timer"]),
             Ok(Command::Install {
                 timer: Some(false),
+                status: false
+            })
+        );
+        assert_eq!(
+            parse(&["install", "--status"]),
+            Ok(Command::Install {
+                timer: None,
                 status: true
             })
         );
@@ -232,6 +222,8 @@ mod tests {
         assert!(parse(&["get", "--now"]).is_err());
         assert!(parse(&["get", "--refresh", "--refresh"]).is_err());
         assert!(parse(&["install", "--timer", "--no-timer"]).is_err());
+        assert!(parse(&["install", "--timer", "--status"]).is_err());
+        assert!(parse(&["install", "--status", "--no-timer"]).is_err());
         assert!(parse(&["status", "--purge"]).is_err());
         assert!(parse(&["--help", "get"]).is_err());
     }

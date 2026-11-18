@@ -51,7 +51,9 @@ pub fn find(configured: Option<&Path>) -> Option<PathBuf> {
     }
 }
 
-fn trusted(p: &Path, user_ok: bool) -> Option<PathBuf> {
+/// `p`, resolved, when it and every folder above it belong to root (or, with `user_ok`, to the
+/// user) and group and others cannot write them.
+pub fn trusted(p: &Path, user_ok: bool) -> Option<PathBuf> {
     if !p.is_absolute() {
         return None;
     }

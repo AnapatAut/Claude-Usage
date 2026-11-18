@@ -7,10 +7,8 @@ themselves: more calls (and HTTP 429 sooner), different numbers in each tool, an
 the OAuth token handling per tool. `claude-usage` is the only program that calls the endpoint.
 Every tool asks it, and every tool works without it.
 
-**Status: under construction.** `get`, `fetch` and `status` work; `install` and `uninstall`
-do not yet (they answer "not implemented"). The systemd user units are in `systemd/`, to be
-installed by `claude-usage install`. The interface below is a draft (`schema: 0`) and may still
-change.
+**Status: under construction, no release yet.** Every command works; the interface below is a
+draft (`schema: 0`) and may still change.
 
 ## Interface (draft)
 
@@ -19,8 +17,9 @@ claude-usage get [--refresh]     the cached numbers as JSON; never touches the n
                                  --refresh also starts a detached fetch when one is due.
 claude-usage fetch [--now]       fetch if due (run by a systemd user timer at :00 and :30)
 claude-usage status              human-readable state
-claude-usage install [--timer | --no-timer] [--status]     (not yet)
-claude-usage uninstall [--purge]                            (not yet)
+claude-usage install [--timer | --no-timer]   install or upgrade, for you (see Install)
+claude-usage install --status                 check the install
+claude-usage uninstall [--purge]              remove it (--purge: its state too)
 ```
 
 `claude-usage get` prints:
@@ -53,6 +52,44 @@ claude-usage uninstall [--purge]                            (not yet)
 - systemd user services for the timer (optional: tools that call `get --refresh` start fetches
   themselves while someone looks).
 
+## Install
+
+From a release tarball, as yourself (never with `sudo`):
+
+```
+tar -xzf claude-usage-<version>-x86_64-linux.tar.gz
+claude-usage-<version>-x86_64-linux/install.sh            # or --no-timer
+```
+
+`install.sh` checks the files against `SHA256SUMS`, then runs `claude-usage install`, which
+places `~/.local/bin/claude-usage`, the systemd user units `claude-usage.service` and
+`claude-usage.timer` in `~/.config/systemd/user/`, and a manifest of what it wrote (with each
+file's sha256) in `~/.local/share/claude-usage/`. The timer (every :00 and :30) is enabled unless
+you pass `--no-timer`; the choice is kept across reruns and upgrades until `--timer` or
+`--no-timer` changes it. Without the timer, tools that call `get --refresh` start fetches while
+someone looks.
+
+- Rerun it to upgrade, or to finish an install that stopped part-way (it never rolls back).
+- It refuses, changing nothing, when a file at one of its paths is not its own: another
+  program's, a unit you edited (keep your changes in a drop-in,
+  `~/.config/systemd/user/claude-usage.service.d/`), or a symbolic link. A symlinked
+  `~/.local/bin` or `~/.config` (dotfiles) is followed.
+- Without a running systemd user manager (no session, or no systemd), the files are installed
+  and the timer is enabled by its link; it starts with the manager.
+- Without linger (`loginctl enable-linger`), the timer runs only while you are logged in.
+- If you set `CLAUDE_CONFIG_DIR`, the user manager needs it too:
+  `systemctl --user set-environment CLAUDE_CONFIG_DIR=…`, or a drop-in.
+- `claude-usage install --status` checks every file against the manifest and the timer
+  (exit 0 healthy, 1 not installed, 4 problems).
+
+`claude-usage uninstall` stops and disables the timer, removes the program, waits up to 15 s
+for a running fetch to finish, then removes the units and the manifest. A file changed since
+the install, and your drop-ins, are kept and named. The state in `~/.local/state/claude-usage/`
+stays unless you pass `--purge`. Claude Code's files are never touched.
+
+Exit codes of `install` and `uninstall`: 0 done, 1 refused (nothing changed), 2 usage, 3 stopped
+part-way (run the same command again to finish).
+
 ## Security
 
 - The OAuth token is read from Claude Code's credentials file at fetch time and given to curl
@@ -64,8 +101,11 @@ claude-usage uninstall [--purge]                            (not yet)
   root-owned folders, run with `-q` (no `.curlrc`), an empty environment and no redirects.
 - Its own state is owner-only, under `~/.local/state/claude-usage/`, written through folder
   file descriptors (no symlink is followed there).
-- Every write refuses to run as root, setuid, or with a `$HOME` or credentials file that is not
-  the user's. The process is not dumpable and makes no core dumps.
+- Every write (`fetch`, `install`, `uninstall`) refuses to run as root, setuid, or with a
+  `$HOME` or credentials file that is not the user's.
+- `install` and `uninstall` change only files their manifest records at the recorded hash,
+  write each file atomically, and run `systemctl --user` from `/usr/bin` or `/bin` only, with an
+  empty environment. The process is not dumpable and makes no core dumps.
 
 ## Development
 
@@ -79,6 +119,8 @@ tests/lint.sh                    # rustfmt, clippy, bash syntax, shellcheck, pri
 tests/cargo-wrapper.sh           # scripts/cargo's own guarantees, against a hostile crate
 tests/cli.sh                     # the contract, black box, against a fake curl (in a container)
 sandbox/run.sh                   # real systemd, real curl, an HTTPS stand-in (in a container)
+tests/mutate.sh                  # each safeguard broken once: its named check must fail
+scripts/tarball.sh               # the release tarball, reproducible, in target/dist/
 tools/install-hooks.sh           # once per clone: privacy hooks for commit and push
 scripts/cargo --down             # remove the build image and the crate cache
 ```

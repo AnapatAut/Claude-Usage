@@ -2,7 +2,8 @@
 # nginx as an HTTPS stand-in for api.anthropic.com (on loopback, /etc/hosts points the name
 # there), its certificate signed by a test CA that only this image trusts. Two users: sbuser
 # (2001) with linger, so it has a user manager, and sbuser2 (2002) without. The repo's tracked
-# files in /opt/cu, the release binary that scripts/cargo built in /opt/cu-bin.
+# files in /opt/cu; the release tarball scripts/tarball.sh made from the working tree in
+# /opt/cu-rel/release.tar.gz, and its program in /opt/cu-bin.
 # Never used in production. Packages are baked in: the test container has no network.
 # Pinned by digest (a re-pointed tag cannot swap it): the same ubuntu:24.04 as tests/cli.sh.
 FROM ubuntu@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
@@ -37,4 +38,6 @@ RUN rm -f /etc/nginx/sites-enabled/default \
     && ln -s /etc/nginx/sites-available/cu-stub /etc/nginx/sites-enabled/cu-stub \
     && nginx -t 2>/dev/null
 COPY cu /opt/cu
-COPY claude-usage /opt/cu-bin/claude-usage
+COPY release.tar.gz /opt/cu-rel/release.tar.gz
+RUN mkdir /opt/cu-bin && tar -xzf /opt/cu-rel/release.tar.gz -C /opt/cu-bin --strip-components=1 \
+       --wildcards '*/claude-usage' && chmod 755 /opt/cu-bin/claude-usage

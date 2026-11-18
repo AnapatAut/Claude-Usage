@@ -140,11 +140,12 @@ inside_diff() {
 cutlog() { x sh -c 'head -n "$1" /var/log/stub.log > /var/log/stub.cut && cat /var/log/stub.cut > /var/log/stub.log && rm /var/log/stub.cut' _ "$1"; }
 calls() { x sh -c '[ -f /var/log/stub.log ] && wc -l < /var/log/stub.log || echo 0' | tr -d ' '; }
 lastline() { x tail -n 1 /var/log/stub.log 2>/dev/null; }
-probe() { x curl -s -o /dev/null -w '%{http_code}' https://api.anthropic.com/probe; }
+probe() { x curl -s --max-time 2 -o /dev/null -w '%{http_code}' https://api.anthropic.com/probe; }
 # The probes (the old mode may answer a few until the reload is done) are cut from the log.
+# The slow mode throttles even its headers: its probe times out (000).
 mode() {
 	local want n
-	case $1 in ok) want=404 ;; 429) want=429 ;; redirect) want=302 ;; esac
+	case $1 in ok) want=404 ;; 429) want=429 ;; redirect) want=302 ;; slow) want=000 ;; esac
 	n=$(calls)
 	x cp "/opt/cu/sandbox/https-stub/mode-$1.conf" /etc/nginx/cu-mode.conf && x nginx -s reload 2> /dev/null &&
 		wait_for 10 '[ "$(probe)" = "$want" ]' && cutlog "$n"
@@ -212,13 +213,13 @@ if ! err=$(docker network create --internal --label "cu-sandbox.pulled-buildkit=
 fi
 LOCKED=1
 
-echo "== build (the release binary, then ubuntu:24.04 + systemd, curl, nginx, the repo's tracked files)"
-"$REPO/scripts/cargo" build --release --locked >&2 || die "cargo build"
+echo "== build (the release tarball, then ubuntu:24.04 + systemd, curl, nginx, the repo's tracked files)"
 CTX="$(mktemp -d)"
+tb=$("$REPO/scripts/tarball.sh" "$CTX/dist") || die "scripts/tarball.sh"
+mv "$tb" "$CTX/release.tar.gz" && rmdir "$CTX/dist"
 mkdir -p "$CTX/cu"
 (cd "$REPO" && git ls-files -z | xargs -0 -I{} cp -P --parents {} "$CTX/cu/") || die "copying the repo"
 [ -f "$CTX/cu/systemd/claude-usage.service" ] || die "copying the repo: no systemd/claude-usage.service (not git-added?)"
-cp "$REPO/target/release/claude-usage" "$CTX/claude-usage"
 cp "$REPO/sandbox/Dockerfile" "$CTX/"
 docker buildx create --name "$BUILDER" --driver docker-container --driver-opt image="$BK" \
 	--driver-opt memory=1g --driver-opt memory-swap=1g >/dev/null 2>&1 || die "builder"
@@ -247,16 +248,31 @@ chk "the stand-in answers on https://api.anthropic.com with the test CA, over HT
 	'x systemctl status nginx --no-pager | tail -5; x tail -3 /var/log/stub.err'
 v=$(x curl --version | head -1); info "real curl: $v"
 
-echo "== 2. by hand as sbuser: the binary, the units, credentials (install comes in phase 5)"
+echo "== 2. install from the release tarball (install.sh), credentials"
 EXP=$((($(date +%s) + 6 * 3600) * 1000))
 creds="{\"claudeAiOauth\":{\"accessToken\":\"SECRET-TOKEN-SBX\",\"refreshToken\":\"SECRET-REFRESH-SBX\",\"expiresAt\":$EXP},\"mcpOAuth\":{\"s|1\":{\"accessToken\":\"SECRET-MCP-SBX\"}}}"
-printf '%s' "$creds" | docker exec -i -u sbuser -e XDG_RUNTIME_DIR=$RUN1 -e DBUS_SESSION_BUS_ADDRESS=unix:path=$RUN1/bus -w $H1 "$C" sh -ec '
-	mkdir -p ~/.local/bin ~/.config/systemd/user ~/.claude
-	install -m 755 /opt/cu-bin/claude-usage ~/.local/bin/claude-usage
-	install -m 644 /opt/cu/systemd/claude-usage.service /opt/cu/systemd/claude-usage.timer ~/.config/systemd/user/
-	umask 077; cat > ~/.claude/.credentials.json
-	systemctl --user daemon-reload'
+printf '%s' "$creds" | docker exec -i -u sbuser -w $H1 "$C" sh -ec 'mkdir -p ~/.claude; umask 077; cat > ~/.claude/.credentials.json'
 unset creds
+# sbuser's files (not folders) before any install: uninstall --purge must leave exactly these.
+HOME0=$(ux sh -c 'find ~ \( -type f -o -type l \) | sort')
+r=$(x sh -c 'cd /tmp && tar -xzf /opt/cu-rel/release.tar.gz && cd / && /tmp/claude-usage-*/install.sh' 2>&1); rc=$?
+x sh -c 'rm -rf /tmp/claude-usage-*'
+chk "install.sh as root: refused (exit 1), nothing installed for root" \
+	'[ "$rc" = 1 ] && echo "$r" | grep -q "not as root" && ! x sh -c "test -e ~root/.local/bin/claude-usage"' 'echo "$r"'
+r=$(x env HOME=$H1 /opt/cu-bin/claude-usage install 2>&1); rc=$?
+chk "claude-usage install as root with sbuser's HOME (sudo -E style): refused, nothing of root's in sbuser's home" \
+	'[ "$rc" = 1 ] && echo "$r" | grep -q "running as root" && [ -z "$(x find $H1 -user root)" ]' 'echo "$r"; x find $H1 -user root'
+r=$(x sh -c 'cd / && /opt/cu-bin/claude-usage install' 2>&1); rc=$?
+chk "claude-usage install as root in root's own home: refused, nothing installed" \
+	'[ "$rc" = 1 ] && echo "$r" | grep -q "running as root" && ! x sh -c "test -e ~root/.local"' 'echo "$r"'
+ux sh -ec 'mkdir ~/rel && tar -xzf /opt/cu-rel/release.tar.gz -C ~/rel'
+REL=$(ux sh -c 'ls -d ~/rel/claude-usage-*-x86_64-linux')
+r=$(ux sh -c 'cd /tmp && "$1/install.sh" --no-timer' _ "$REL" 2>&1); rc=$?
+chk "install.sh from another folder, as sbuser, --no-timer: exit 0, installed, the units loaded, the timer disabled" \
+	'[ "$rc" = 0 ] && ux cmp -s "$REL/claude-usage" "$CU" && [ "$(ux systemctl --user is-enabled claude-usage.timer 2>&1)" = disabled ] && [ "$(uprop claude-usage.service LoadState)" = loaded ] && echo "$r" | grep -q "^timer: off"' \
+	'echo "$r"'
+r=$(cu install --status 2>&1); rc=$?
+chk "install --status: healthy, exit 0" '[ "$rc" = 0 ] && echo "$r" | grep -qx healthy' 'echo "$r"'
 chk "the units load (systemd-analyze verify: nothing said)" \
 	'[ -z "$(ux systemd-analyze --user verify ~/.config/systemd/user/claude-usage.service ~/.config/systemd/user/claude-usage.timer 2>&1)" ]' \
 	'ux systemd-analyze --user verify ~/.config/systemd/user/claude-usage.service ~/.config/systemd/user/claude-usage.timer'
@@ -300,9 +316,9 @@ cutlog "$n0"; x rm -f /tmp/curlrc-trace /tmp/sslkeys
 ux rm -f "$H1/.curlrc"
 
 echo "== 4. the units: timer, hardening, journal"
-ux systemctl --user enable --now claude-usage.timer >/dev/null 2>&1
-chk "the timer is active, set for :00 and :30" \
-	'[ "$(uprop claude-usage.timer ActiveState)" = active ] && uprop claude-usage.timer TimersCalendar | grep -q "OnCalendar=\*-\*-\* \*:\*:00,30"' \
+r=$(cu install --timer 2>&1); rc=$?
+chk "install --timer: through systemctl, the timer enabled and active, set for :00 and :30" \
+	'[ "$rc" = 0 ] && echo "$r" | grep -q "^timer: enabled and started" && [ "$(ux systemctl --user is-enabled claude-usage.timer)" = enabled ] && [ "$(uprop claude-usage.timer ActiveState)" = active ] && uprop claude-usage.timer TimersCalendar | grep -q "OnCalendar=\*-\*-\* \*:\*:00,30"' \
 	'ux systemctl --user status claude-usage.timer --no-pager'
 n0=$(calls)
 chk "the timer fires at the next :00/:30 and the fetch calls (a boundary has passed)" \
@@ -336,6 +352,7 @@ P
 	rm -r "$d"; systemctl --user daemon-reload
 	systemd-run --user --quiet --wait --collect ~/probe.sh "$XDG_RUNTIME_DIR/cu-plain"'
 HARD=$(ux cat $RUN1/cu-hard 2>&1) PLAIN=$(ux cat $RUN1/cu-plain 2>&1)
+ux rm -f "$H1/probe.sh" "$RUN1/cu-hard" "$RUN1/cu-plain"
 info "probe, hardened: ${HARD//$'\n'/; }"
 info "probe, plain:    ${PLAIN//$'\n'/; }"
 hv() { printf '%s\n' "$1" | sed -n "s/^$2 //p"; }
@@ -372,7 +389,9 @@ ux systemctl --user reset-failed claude-usage.service 2>/dev/null
 chk "a refusal under the unit: its line in the journal at warning priority (LogLevelMax keeps it)" \
 	'x journalctl --no-pager -o json _SYSTEMD_USER_UNIT=claude-usage.service | jq -r "select(.MESSAGE | test(\"fetch refused\")) | .PRIORITY" | grep -qx 4' \
 	'x journalctl --no-pager -o json _SYSTEMD_USER_UNIT=claude-usage.service | tail -3'
-ux systemctl --user disable --now claude-usage.timer >/dev/null 2>&1
+r=$(cu install --no-timer 2>&1); rc=$?
+chk "install --no-timer: through systemctl, the timer disabled and stopped" \
+	'[ "$rc" = 0 ] && [ "$(ux systemctl --user is-enabled claude-usage.timer 2>&1)" = disabled ] && [ "$(uprop claude-usage.timer ActiveState)" = inactive ]' 'echo "$r"'
 
 echo "== 5. what needs root"
 r=$(x env HOME=$H1 CLAUDE_CONFIG_DIR=$H1/.claude "$CU" fetch 2>&1); rc=$?
@@ -430,7 +449,69 @@ x umount "$K"
 cu fetch; rc=$?
 chk "(control: the folder usable again, the same fetch calls: it was due all along)" '[ "$rc" = 0 ] && [ "$(calls)" = $((n0 + 1)) ]'
 
-echo "== 6. leaks"
+echo "== 6. install and uninstall"
+# An upgrade: the same release with a byte appended to its program (an ELF file runs with
+# trailing data) and new sums.
+ux sh -ec 'cp -r "$1" ~/rel/next && cd ~/rel/next && printf x >> claude-usage && sha256sum claude-usage install.sh > SHA256SUMS' _ "$REL"
+r=$(ux sh -c 'cd / && ~/rel/next/install.sh' 2>&1); rc=$?
+chk "an upgrade without a flag: exit 0, the new program in place and running, the timer still off" \
+	'[ "$rc" = 0 ] && ux cmp -s "$H1/rel/next/claude-usage" "$CU" && cu get | jq -e .schema > /dev/null && [ "$(ux systemctl --user is-enabled claude-usage.timer 2>&1)" = disabled ] && ux grep -qx "timer off" "$H1/.local/share/claude-usage/manifest"' \
+	'echo "$r"'
+r=$(ux sh -c 'cd / && "$1/install.sh"' _ "$REL" 2>&1); rc=$?
+chk "and back to the first release: exit 0, still off" \
+	'[ "$rc" = 0 ] && ux cmp -s "$REL/claude-usage" "$CU" && [ "$(ux systemctl --user is-enabled claude-usage.timer 2>&1)" = disabled ]' 'echo "$r"'
+# Kills: install --timer killed at points up to 0.3 s in (its systemctl calls), then run again.
+# The delay is bash's own read -t on a FIFO (no forked sleep).
+hits=0 good=1
+for d in 0.001 0.003 0.006 0.01 0.02 0.04 0.07 0.1 0.15 0.2 0.3; do
+	h=$(ux bash -c 'f=$(mktemp -u); mkfifo "$f"; exec 5<> "$f"; rm "$f"
+		"$1" install --timer > /dev/null 2>&1 & p=$!
+		read -rt "$2" -u 5 _; kill -9 "$p" 2> /dev/null; wait "$p" 2> /dev/null
+		grep -qx "pending install" ~/.local/share/claude-usage/manifest && echo hit; true' _ "$CU" "$d")
+	[ "$h" = hit ] && hits=$((hits + 1))
+	r=$(cu install --timer 2>&1) && cu install --status > /dev/null && [ "$(uprop claude-usage.timer ActiveState)" = active ] || good=0
+	cu install --no-timer > /dev/null 2>&1 || good=0
+done
+info "install --timer killed at 11 points: $hits landed mid-install"
+chk "install --timer killed at 11 points (at least one mid-install): the next run finishes it, healthy, the timer active" \
+	'[ "$good" = 1 ] && [ "$hits" -gt 0 ]' 'echo "$r"'
+# No user manager: sbuser2 (no linger) installs; turning linger on starts the timer.
+x sh -ec 'mkdir /home/sbuser2/rel && tar -xzf /opt/cu-rel/release.tar.gz -C /home/sbuser2/rel && chown -R sbuser2:sbuser2 /home/sbuser2/rel'
+r=$(docker exec -u sbuser2 -w / "$C" sh -c '/home/sbuser2/rel/claude-usage-*/install.sh' 2>&1); rc=$?
+chk "install with no user manager (sbuser2): exit 0, the files, the timer linked, when it starts and linger said" \
+	'[ "$rc" = 0 ] && echo "$r" | grep -q "starts with your systemd user manager" && echo "$r" | grep -q "linger is off" && x test -L /home/sbuser2/.config/systemd/user/timers.target.wants/claude-usage.timer && x test -x /home/sbuser2/.local/bin/claude-usage' \
+	'echo "$r"'
+x loginctl enable-linger sbuser2
+u2() { docker exec -u sbuser2 -e XDG_RUNTIME_DIR=/run/user/$UID2 -w /home/sbuser2 "$C" "$@"; }
+chk "linger on, sbuser2's manager starts: the timer is active with no systemctl enable" \
+	'wait_for 30 "x systemctl is-active --quiet user@$UID2.service" && wait_for 20 "u2 systemctl --user is-active --quiet claude-usage.timer"'
+r=$(u2 /home/sbuser2/.local/bin/claude-usage uninstall --purge 2>&1); rc=$?
+chk "sbuser2's uninstall --purge through systemctl: exit 0, the timer gone" \
+	'[ "$rc" = 0 ] && ! u2 systemctl --user is-active --quiet claude-usage.timer && [ -z "$(x find /home/sbuser2/.config/systemd/user /home/sbuser2/.local -type f)" ]' 'echo "$r"'
+# uninstall --purge while a fetch runs (the stand-in answers at 1 byte/s: the fetch holds its
+# lock for 5 s) and readers keep calling get --refresh: it waits, then removes everything; no
+# fetch makes the state again. The timer is off: uninstall stops the service first, which would
+# end a fetch the timer started instead of waiting for it.
+mode slow
+age 3700
+ux sh -c 'setsid "$1" fetch < /dev/null > /dev/null 2>&1 &' _ "$CU"
+wait_for 5 '! ux sh -c "flock -n ~/.local/state/claude-usage/*/.lock true"'
+ux sh -c 'setsid sh -c '"'"'end=$(($(date +%s) + 12)); while [ "$(date +%s)" -lt "$end" ]; do "$0" get --refresh; sleep 0.1; done'"'"' "$1" < /dev/null > /dev/null 2>&1 &' _ "$CU"
+s=$(date +%s)
+r=$(cu uninstall --purge 2>&1); rc=$?
+e=$(($(date +%s) - s))
+chk "uninstall --purge during a running fetch, readers racing it: waits for the fetch, exit 0" '[ "$rc" = 0 ] && [ "$e" -ge 2 ]' 'echo "$r (took $e s)"'
+sleep 13
+chk "after it: no claude-usage process, no state made again, the units unknown to the manager" \
+	'! x pgrep -u sbuser -f claude-usage > /dev/null && ! ux test -e "$H1/.local/state/claude-usage" && [ "$(uprop claude-usage.timer LoadState)" = not-found ]' \
+	'x pgrep -a -u sbuser -f claude-usage; ux ls -la "$H1/.local/state"; uprop claude-usage.timer LoadState'
+ux rm -rf "$H1/rel"
+HOME1=$(ux sh -c 'find ~ \( -type f -o -type l \) | sort')
+chk "uninstall --purge left exactly sbuser's files from before the install (empty folders aside)" '[ "$HOME1" = "$HOME0" ]' \
+	'diff <(echo "$HOME0") <(echo "$HOME1")'
+mode ok
+
+echo "== 7. leaks"
 chk "the journal holds no token" '[ "$(x sh -c "journalctl -o export | grep -c SECRET")" = 0 ]'
 # Every file in the container but /proc, /sys, /dev (/dev/shm is searched) and the repo's copy.
 # Allowed: the credentials, the stand-in's log and its mode file.
