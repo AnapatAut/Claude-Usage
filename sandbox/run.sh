@@ -5,6 +5,8 @@
 # Leaves nothing behind.
 #   sandbox/run.sh            build, run every check, tear down  (about 2 min)
 #   KEEP=1 sandbox/run.sh     same, but leave the container and image up to look around
+#   RELEASE=FILE sandbox/run.sh   with a downloaded release tarball instead of one built here
+#                             (the release check: run it in a checkout of that release's tag)
 #   sandbox/run.sh --down     remove what a finished or killed run left (refused while one runs)
 # Needs Docker, and internet for the build only (Ubuntu packages, BuildKit); the test container
 # has none.
@@ -215,8 +217,14 @@ LOCKED=1
 
 echo "== build (the release tarball, then ubuntu:24.04 + systemd, curl, nginx, the repo's tracked files)"
 CTX="$(mktemp -d)"
-tb=$("$REPO/scripts/tarball.sh" "$CTX/dist") || die "scripts/tarball.sh"
-mv "$tb" "$CTX/release.tar.gz" && rmdir "$CTX/dist"
+if [ -n "${RELEASE:-}" ]; then
+	[ -f "$RELEASE" ] && [ ! -L "$RELEASE" ] || die "RELEASE=$RELEASE: not a file"
+	cp "$RELEASE" "$CTX/release.tar.gz" || die "copying $RELEASE"
+	info "RELEASE: $(basename "$RELEASE"), sha256 $(sha256sum < "$RELEASE" | cut -c1-64)"
+else
+	tb=$("$REPO/scripts/tarball.sh" "$CTX/dist") || die "scripts/tarball.sh"
+	mv "$tb" "$CTX/release.tar.gz" && rmdir "$CTX/dist"
+fi
 mkdir -p "$CTX/cu"
 (cd "$REPO" && git ls-files -z | xargs -0 -I{} cp -P --parents {} "$CTX/cu/") || die "copying the repo"
 [ -f "$CTX/cu/systemd/claude-usage.service" ] || die "copying the repo: no systemd/claude-usage.service (not git-added?)"
@@ -488,6 +496,31 @@ chk "linger on, sbuser2's manager starts: the timer is active with no systemctl 
 r=$(u2 /home/sbuser2/.local/bin/claude-usage uninstall --purge 2>&1); rc=$?
 chk "sbuser2's uninstall --purge through systemctl: exit 0, the timer gone" \
 	'[ "$rc" = 0 ] && ! u2 systemctl --user is-active --quiet claude-usage.timer && [ -z "$(x find /home/sbuser2/.config/systemd/user /home/sbuser2/.local -type f)" ]' 'echo "$r"'
+# Group-writable folders (sbuser2, its timer off): its private group alone may write; a group
+# with a member listed, a group named otherwise, and an ACL are refused. And a HOME that is not
+# the passwd home (the units would never be read, %h names another program) is refused.
+CU2=$(x sh -c 'ls -d /home/sbuser2/rel/claude-usage-*-x86_64-linux')/claude-usage
+x sh -ec 'mkdir -p /home/sbuser2/.local/bin && chown sbuser2:sbuser2 /home/sbuser2/.local /home/sbuser2/.local/bin && chmod 775 /home/sbuser2/.local/bin'
+r=$(u2 "$CU2" install --no-timer 2>&1); rc=$?
+chk "a ~/.local/bin writable by the user's private group (775): accepted" '[ "$rc" = 0 ]' 'echo "$r"'
+u2 "$CU2" uninstall > /dev/null 2>&1
+x usermod -aG sbuser2 sbuser
+r=$(u2 "$CU2" install --no-timer 2>&1); rc=$?
+x gpasswd -d sbuser sbuser2 > /dev/null
+chk "the same, another user listed in that group: refused" '[ "$rc" = 1 ] && echo "$r" | grep -q "only you can write"' 'echo "$r"'
+x setfacl -m u:sbuser:rwx /home/sbuser2/.local/bin
+r=$(u2 "$CU2" install --no-timer 2>&1); rc=$?
+acl_n=$(x getfacl -cp /home/sbuser2/.local/bin | grep -c "^user:sbuser:")
+x setfacl -b /home/sbuser2/.local/bin
+chk "the same, an ACL letting another user write: refused" '[ "$acl_n" = 1 ] && [ "$rc" = 1 ] && echo "$r" | grep -q "only you can write"' 'echo "$r"'
+x chgrp sbshared /home/sbuser2/.local/bin
+r=$(docker exec -u sbuser2:sbshared -w /home/sbuser2 "$C" "$CU2" install --no-timer 2>&1); rc=$?
+x chgrp sbuser2 /home/sbuser2/.local/bin
+chk "the same, the effective group one not named as the user: refused" '[ "$rc" = 1 ] && echo "$r" | grep -q "only you can write"' 'echo "$r"'
+r=$(u2 sh -c 'mkdir -p /tmp/h2 && HOME=/tmp/h2 "$1" install --no-timer' _ "$CU2" 2>&1); rc=$?
+chk "install with a HOME that is not the passwd home: refused, nothing made there" \
+	'[ "$rc" = 1 ] && echo "$r" | grep -q "not your home in the passwd file" && [ -z "$(x ls -A /tmp/h2)" ]' 'echo "$r"'
+x rm -rf /tmp/h2 /home/sbuser2/.local
 # uninstall --purge while a fetch runs (the stand-in answers at 1 byte/s: the fetch holds its
 # lock for 5 s) and readers keep calling get --refresh: it waits, then removes everything; no
 # fetch makes the state again. The timer is off: uninstall stops the service first, which would

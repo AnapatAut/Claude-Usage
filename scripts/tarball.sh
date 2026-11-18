@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Builds the release tarball from the working tree: the static binary (scripts/cargo build),
 # install.sh, SHA256SUMS of both, README.md, CHANGELOG.md and LICENSE, in one folder
-# claude-usage-<version>-x86_64-linux/. Reproducible: sorted names, files dated by the last
-# commit, owner 0, fixed modes, gzip without name or time.
+# claude-usage-v<version>-x86_64-linux/. Reproducible: sorted names, files dated by the last
+# commit, owner 0, fixed modes, gzip without name or time (so the same only from a clean
+# checkout: uncommitted changes still get the last commit's date).
 #   scripts/tarball.sh [OUT_DIR]     default: ./target/dist
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT=$(realpath -m -- "${1:-$REPO/target/dist}") # a relative one: from the caller's folder
 cd "$REPO"
-OUT="${1:-$REPO/target/dist}"
 die() { echo "scripts/tarball.sh: $*" >&2; exit 1; }
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "no version in Cargo.toml"
 scripts/cargo build --release --locked >&2 || die "build failed"
-name="claude-usage-$version-x86_64-linux"
+name="claude-usage-v$version-x86_64-linux"
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir -m 755 "$stage/$name"

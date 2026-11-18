@@ -8,7 +8,7 @@
 # Pinned by digest (a re-pointed tag cannot swap it): the same ubuntu:24.04 as tests/cli.sh.
 FROM ubuntu@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      systemd systemd-sysv dbus dbus-user-session curl ca-certificates openssl nginx jq procps \
+      systemd systemd-sysv dbus dbus-user-session curl ca-certificates openssl nginx jq procps acl \
     && rm -rf /var/lib/apt/lists/* \
     && systemctl mask systemd-sysctl.service systemd-udevd.service systemd-udevd-control.socket \
        systemd-udevd-kernel.socket systemd-modules-load.service systemd-remount-fs.service \
@@ -19,6 +19,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
        systemd-timesyncd.service systemd-resolved.service systemd-networkd.service \
     && useradd -m -s /bin/bash -u 2001 sbuser \
     && useradd -m -s /bin/bash -u 2002 sbuser2 \
+    && groupadd -g 2100 sbshared \
     && mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/sbuser
 # The test CA and the stand-in's certificate, valid 7 days. CERT_DATE (run.sh passes today's
 # date) busts the build cache daily, so a cached layer never hands out expired certificates.

@@ -397,6 +397,55 @@ pub fn passwd_entry(uid: libc::uid_t) -> Option<(OsString, PathBuf)> {
     ))
 }
 
+/// A group's name and whether /etc/group lists any member in it, or None when it has no entry.
+pub fn group_entry(gid: libc::gid_t) -> Option<(OsString, bool)> {
+    let mut buf = vec![0u8; 65536];
+    let mut gr = MaybeUninit::<libc::group>::uninit();
+    let mut res: *mut libc::group = std::ptr::null_mut();
+    // SAFETY: valid buffers; getgrgid_r writes into gr and buf and sets res.
+    let r = unsafe {
+        libc::getgrgid_r(
+            gid,
+            gr.as_mut_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut res,
+        )
+    };
+    if r != 0 || res.is_null() {
+        return None;
+    }
+    // SAFETY: res points at gr, filled; gr_name and gr_mem point into buf; gr_mem is a
+    // NULL-terminated array (or NULL).
+    let (name, members) = unsafe {
+        let mem = (*res).gr_mem;
+        (
+            CStr::from_ptr((*res).gr_name),
+            !mem.is_null() && !(*mem).is_null(),
+        )
+    };
+    Some((OsStr::from_bytes(name.to_bytes()).to_owned(), members))
+}
+
+/// Whether a file has a POSIX access ACL (then its group bits are the ACL's mask, and other
+/// users or groups may have entries of their own). An error counts as having one.
+pub fn has_access_acl(fd: BorrowedFd<'_>) -> bool {
+    // SAFETY: a valid fd and NUL-terminated name; size 0 asks only for the length.
+    let r = unsafe {
+        libc::fgetxattr(
+            fd.as_raw_fd(),
+            c"system.posix_acl_access".as_ptr(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if r >= 0 {
+        return true;
+    }
+    let e = io::Error::last_os_error().raw_os_error();
+    !matches!(e, Some(libc::ENODATA) | Some(libc::EOPNOTSUPP))
+}
+
 /// Sends SIGKILL to a process group.
 pub fn kill_group(pgid: libc::pid_t) {
     if pgid > 1 {

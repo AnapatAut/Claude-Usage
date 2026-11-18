@@ -1,0 +1,73 @@
+# Every check, in the same containers as on a workstation (scripts/cargo, tests/cli.sh,
+# sandbox/run.sh). Read-only token; no secrets; actions pinned by commit.
+# Also called by release.yml, so a release is built only from a commit that passes all of it.
+# tests/mutate.sh (about an hour) runs only when started by hand.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      mutate:
+        description: also run tests/mutate.sh (about an hour)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: lint, unit and contract tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: crates (scripts/cargo's only step with network)
+        run: scripts/cargo fetch
+      - name: lint
+        run: tests/lint.sh
+      - name: unit tests
+        run: scripts/cargo test --locked
+      - name: release build
+        run: scripts/cargo build --release --locked
+      - name: contract tests
+        run: tests/cli.sh
+      - name: mutation tests
+        if: github.event_name == 'workflow_dispatch' && inputs.mutate
+        run: JOBS=2 tests/mutate.sh
+
+  sandbox:
+    name: systemd sandbox
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/cargo fetch
+      - name: systemd sandbox (installs from the release tarball)
+        run: sandbox/run.sh
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: install cargo-audit (pinned, locked)
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: known advisories for Cargo.lock
+        run: cargo audit --deny warnings --file Cargo.lock

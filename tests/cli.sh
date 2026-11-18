@@ -1574,6 +1574,13 @@ case_install() {
 		'[ "$rc" = 1 ] && says "symbolic link" && [ "$(cat "$T/elsewhere/unit")" = keep ] && [ ! -e "$I" ] && [ ! -e "$MAN" ]'
 	ok "a refused install leaves no folder behind (none made before the checks)" '[ "$none1" = 1 ] && [ ! -e "$HOME/.local" ]'
 	fresh
+	m0=$(stat -c %a "$HOME/.config")
+	chmod 555 "$HOME/.config"
+	run "$CU" install
+	chmod "$m0" "$HOME/.config"
+	ok "a refused install part-way through making folders removes the ones it made" \
+		'[ "$rc" = 1 ] && says "cannot be created" && [ ! -e "$HOME/.local" ] && [ ! -e "$HOME/.config/systemd" ]'
+	fresh
 	mkdir -p "$UD/timers.target.wants" "$T/elsewhere" && cp /src/systemd/claude-usage.timer "$T/elsewhere/"
 	ln -s "$T/elsewhere/claude-usage.timer" "$UD/timers.target.wants/claude-usage.timer"
 	run "$CU" install
@@ -1594,7 +1601,9 @@ case_install() {
 	ok "install: a ~/.local/bin others can write, refused, nothing written" '[ "$rc" = 1 ] && says "only you can write" && [ ! -e "$MAN" ] && [ ! -e "$I" ]'
 	chmod 775 "$HOME/.local/bin"
 	run "$CU" install
-	ok "install: group-writable for your own group only (private groups), accepted" '[ "$rc" = 0 ] && installed on'
+	# A private group is accepted (the sandbox checks it: it has real users and groups); here
+	# the group has no entry, so it cannot be known as yours alone.
+	ok "install: group-writable for a group not known as your private one, refused" '[ "$rc" = 1 ] && says "only you can write" && [ ! -e "$MAN" ] && [ ! -e "$I" ]'
 	fresh
 	mkdir -p "$HOME/.local/share" "$T/elsewhere/share" && ln -s "$T/elsewhere/share" "$HOME/.local/share/claude-usage"
 	run "$CU" install
@@ -1695,6 +1704,23 @@ case_install() {
 	ok "install while an uninstall is unfinished: refused (exit 1)" '[ "$rc" = 1 ] && says "uninstall is unfinished"'
 	run "$CU" uninstall
 	ok "uninstall again finishes it" '[ "$rc" = 0 ] && [ ! -e "$MAN" ] && [ ! -e "$I" ]'
+	run "$CU" install
+	chmod 500 "$HOME/.local/bin"
+	run "$CU" uninstall
+	chmod 700 "$HOME/.local/bin"
+	r1=$rc s1=$(says "could not be removed" && echo said) p1=$(grep -cx 'pending uninstall' "$MAN")
+	ok "uninstall that cannot remove the program: exit 3, the program and the manifest (pending) kept" \
+		'[ "$r1" = 3 ] && [ "$s1" = said ] && [ "$p1" = 1 ] && [ -e "$I" ] && [ ! -e "$UD/claude-usage.timer" ]'
+	run "$CU" uninstall
+	ok "uninstall again then finishes it" '[ "$rc" = 0 ] && [ ! -e "$I" ] && [ ! -e "$MAN" ]'
+	rm -rf "$UD/timers.target.wants" && : > "$UD/timers.target.wants"
+	run "$CU" install
+	ok "install: the timer cannot be enabled: the files installed, exit 3, said" \
+		'[ "$rc" = 3 ] && installed on && says "NOT enabled" && says "timer is not enabled as asked"'
+	rm "$UD/timers.target.wants"
+	run "$CU" install
+	ok "install again once that is fixed: exit 0, the timer linked" '[ "$rc" = 0 ] && linked'
+	run "$CU" uninstall
 
 	# uninstall and running fetches: it waits for their locks, 15 s at most.
 	run "$CU" install

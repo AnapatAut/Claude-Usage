@@ -54,11 +54,13 @@ claude-usage uninstall [--purge]              remove it (--purge: its state too)
 
 ## Install
 
-From a release tarball, as yourself (never with `sudo`):
+From a release tarball, as yourself (never with `sudo`). First check that GitHub Actions built it
+from this repository (`SHA256SUMS` inside the tarball checks only that the files arrived whole):
 
 ```
-tar -xzf claude-usage-<version>-x86_64-linux.tar.gz
-claude-usage-<version>-x86_64-linux/install.sh            # or --no-timer
+gh attestation verify claude-usage-v<version>-x86_64-linux.tar.gz --repo AnapatAut/Claude-Usage
+tar -xzf claude-usage-v<version>-x86_64-linux.tar.gz
+claude-usage-v<version>-x86_64-linux/install.sh            # or --no-timer
 ```
 
 `install.sh` checks the files against `SHA256SUMS`, then runs `claude-usage install`, which
@@ -73,7 +75,9 @@ someone looks.
 - It refuses, changing nothing, when a file at one of its paths is not its own: another
   program's, a unit you edited (keep your changes in a drop-in,
   `~/.config/systemd/user/claude-usage.service.d/`), or a symbolic link. A symlinked
-  `~/.local/bin` or `~/.config` (dotfiles) is followed.
+  `~/.local/bin` or `~/.config` (dotfiles) is followed. Its folders must be writable by you
+  alone: group-writable only for your private group (named as you, nobody else in it) and
+  without an ACL. Run it with your own `HOME` (the one in the passwd file).
 - Without a running systemd user manager (no session, or no systemd), the files are installed
   and the timer is enabled by its link; it starts with the manager.
 - Without linger (`loginctl enable-linger`), the timer runs only while you are logged in.
@@ -88,7 +92,8 @@ the install, and your drop-ins, are kept and named. The state in `~/.local/state
 stays unless you pass `--purge`. Claude Code's files are never touched.
 
 Exit codes of `install` and `uninstall`: 0 done, 1 refused (nothing changed), 2 usage, 3 stopped
-part-way (run the same command again to finish).
+part-way (run the same command again to finish; for `install` also: the files are in place but
+the timer is not as asked).
 
 ## Security
 
@@ -121,6 +126,7 @@ tests/cli.sh                     # the contract, black box, against a fake curl 
 sandbox/run.sh                   # real systemd, real curl, an HTTPS stand-in (in a container)
 tests/mutate.sh                  # each safeguard broken once: its named check must fail
 scripts/tarball.sh               # the release tarball, reproducible, in target/dist/
+scripts/key-names.sh [--go]      # once, by the maintainer: the endpoint's key names and types
 tools/install-hooks.sh           # once per clone: privacy hooks for commit and push
 scripts/cargo --down             # remove the build image and the crate cache
 ```
@@ -132,6 +138,9 @@ capped. `fetch`, `generate-lockfile` and `update` get the network but see only t
 supported. Build output (`./target`) and the crate cache persist: after building code you do
 not trust, run `scripts/cargo clean` and `scripts/cargo --down`. See the comment at the top of
 `scripts/cargo`.
+
+CI (`.github/workflows/`) runs the same scripts. Releases are built there from a tag, never on a
+workstation: see [RELEASING.md](RELEASING.md).
 
 ## License
 

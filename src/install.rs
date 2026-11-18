@@ -197,6 +197,10 @@ impl Manifest {
                 _ => return None,
             }
         }
+        // `was` counts only while a run is pending: a finished run clears it.
+        if pending.is_none() && files.iter().flatten().any(|r| r.was.is_some()) {
+            return None;
+        }
         Some(Manifest {
             version: version?.to_owned(),
             timer: timer?,
@@ -284,8 +288,10 @@ fn own_bytes() -> Option<Vec<u8>> {
     (v.len() as u64 <= MAX_FILE && !v.is_empty()).then_some(v)
 }
 
-/// A folder of the user's that nobody else can write (group-writable only for the user's own
-/// group), reached by path: symlinks in it are followed (dotfiles managers link `~/.config`).
+/// A folder of the user's that nobody else can write, reached by path: symlinks in it are
+/// followed (dotfiles managers link `~/.config`). Group-writable only for the user's private
+/// group (the effective group, named as the user, with no members listed) and without an ACL
+/// (whose mask the group bits then are).
 fn open_dir(home: &Path, rel: &str, create: bool) -> Result<Option<OwnedFd>, String> {
     let path = home.join(rel);
     if create
@@ -304,13 +310,22 @@ fn open_dir(home: &Path, rel: &str, create: bool) -> Result<Option<OwnedFd>, Str
     };
     let st = sys::fstat(fd.as_fd()).map_err(|_| format!("~/{rel} cannot be checked"))?;
     let others_write = st.perm() & 0o002 != 0;
-    let group_write = st.perm() & 0o020 != 0 && st.gid != sys::egid();
+    let group_write = st.perm() & 0o020 != 0
+        && (st.gid != sys::egid() || !private_group(st.gid) || sys::has_access_acl(fd.as_fd()));
     if !st.is_dir() || st.uid != sys::euid() || others_write || group_write {
         return Err(format!(
             "~/{rel} is not a folder of yours that only you can write"
         ));
     }
     Ok(Some(fd))
+}
+
+/// The user's own group: named as the user in the passwd entry, nobody else listed in it.
+fn private_group(gid: libc::gid_t) -> bool {
+    match (sys::group_entry(gid), sys::passwd_entry(sys::euid())) {
+        (Some((group, members)), Some((user, _))) => !members && group == user,
+        _ => false,
+    }
 }
 
 /// `~/.local/share/claude-usage/`: never a symlink, the user's, mode 700.
@@ -824,14 +839,10 @@ fn examine(
     }
 }
 
-/// The manifest's folder (made when `create`), locked, and the manifest in it.
-fn open_locked(home: &Path, create: bool) -> Result<(Option<OwnedFd>, Option<Manifest>), String> {
-    let Some(share) = open_share(home, create)? else {
-        return if create {
-            Err("the manifest's folder cannot be made".into())
-        } else {
-            Ok((None, None))
-        };
+/// The manifest's folder if it is there, locked, and the manifest in it.
+fn look_locked(home: &Path) -> Result<(Option<OwnedFd>, Option<Manifest>), String> {
+    let Some(share) = open_share(home, false)? else {
+        return Ok((None, None));
     };
     if sys::flock(share.as_fd(), libc::LOCK_EX | libc::LOCK_NB).is_err() {
         return Err("another install or uninstall is running".into());
@@ -840,12 +851,48 @@ fn open_locked(home: &Path, create: bool) -> Result<(Option<OwnedFd>, Option<Man
     Ok((Some(share), old))
 }
 
+/// Makes `~/rel` a level at a time (mode 700), adding each folder it made to `made`.
+fn make_dirs(home: &Path, rel: &str, made: &mut Vec<PathBuf>) -> Result<(), String> {
+    let mut p = home.to_path_buf();
+    for c in Path::new(rel).components() {
+        p.push(c);
+        match std::fs::DirBuilder::new().mode(0o700).create(&p) {
+            Ok(()) => made.push(p.clone()),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(format!("~/{rel} cannot be created")),
+        }
+    }
+    Ok(())
+}
+
+/// Removes the folders this run made, the deepest first, each only while empty.
+fn unmake(made: &[PathBuf]) {
+    for d in made.iter().rev() {
+        let _ = std::fs::remove_dir(d);
+    }
+}
+
 pub fn install(timer_flag: Option<bool>) -> u8 {
     const CMD: &str = "install";
     let home = match who_may_run() {
         Ok(h) => h,
         Err(m) => return refuse(CMD, &m),
     };
+    // The user manager reads units from, and the service runs the program in (%h), the passwd
+    // home: files placed under another HOME would never run, or leave another program to run.
+    if let Some((_, phome)) = sys::passwd_entry(sys::euid())
+        && paths::canonical(&home) != paths::canonical(&phome)
+    {
+        return refuse(
+            CMD,
+            &format!(
+                "HOME ({}) is not your home in the passwd file ({}), which the timer uses: run it with HOME={}",
+                home.display(),
+                phome.display(),
+                phome.display()
+            ),
+        );
+    }
     let Some(bin) = own_bytes() else {
         return refuse(CMD, "cannot read its own program file");
     };
@@ -861,7 +908,7 @@ pub fn install(timer_flag: Option<bool>) -> u8 {
     // A first look that makes nothing, so a refused install leaves no folder behind. The lock
     // is let go before the folders are made, so everything is checked again below, under it.
     {
-        let (_share, old) = match open_locked(&home, false) {
+        let (_share, old) = match look_locked(&home) {
             Ok(x) => x,
             Err(m) => return refuse(CMD, &m),
         };
@@ -877,18 +924,47 @@ pub fn install(timer_flag: Option<bool>) -> u8 {
         }
     }
 
-    let (share, old) = match open_locked(&home, true) {
-        Ok((Some(s), old)) => (s, old),
-        Ok((None, _)) => return refuse(CMD, "the manifest's folder cannot be made"),
-        Err(m) => return refuse(CMD, &m),
+    // The folders, each level recorded when this run made it: a refusal from here on removes
+    // them again (rmdir: only while empty), except when another run holds the lock.
+    let mut made = Vec::new();
+    if let Err(m) = make_dirs(&home, &format!("{SHARE_DIR}/{NAME}"), &mut made) {
+        unmake(&made);
+        return refuse(CMD, &m);
+    }
+    let share = match open_share(&home, true) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            unmake(&made);
+            return refuse(CMD, "the manifest's folder cannot be made");
+        }
+        Err(m) => {
+            unmake(&made);
+            return refuse(CMD, &m);
+        }
+    };
+    if sys::flock(share.as_fd(), libc::LOCK_EX | libc::LOCK_NB).is_err() {
+        return refuse(CMD, "another install or uninstall is running");
+    }
+    let made_more =
+        make_dirs(&home, BIN_DIR, &mut made).and_then(|()| make_dirs(&home, UNIT_DIR, &mut made));
+    let back_out = |m: &str| {
+        unmake(&made);
+        refuse(CMD, m)
+    };
+    if let Err(m) = made_more {
+        return back_out(&m);
+    }
+    let old = match read_manifest(&share) {
+        Ok(m) => m,
+        Err(m) => return back_out(&m),
     };
     let dirs = match (
-        open_dir(&home, BIN_DIR, true),
-        open_dir(&home, UNIT_DIR, true),
+        open_dir(&home, BIN_DIR, false),
+        open_dir(&home, UNIT_DIR, false),
     ) {
         (Ok(Some(bin)), Ok(Some(units))) => Dirs { bin, units },
-        (Err(m), _) | (_, Err(m)) => return refuse(CMD, &m),
-        _ => return refuse(CMD, "a folder cannot be made"),
+        (Err(m), _) | (_, Err(m)) => return back_out(&m),
+        _ => return back_out("a folder cannot be made"),
     };
     sweep(&dirs.bin, &[NAME]);
     sweep(&dirs.units, &[SERVICE_UNIT, TIMER_UNIT]);
@@ -903,7 +979,7 @@ pub fn install(timer_flag: Option<bool>) -> u8 {
         &new,
     ) {
         Ok(now) => now,
-        Err(m) => return refuse(CMD, &m),
+        Err(m) => return back_out(&m),
     };
     let mut wrote = 0;
     let timer = timer_flag.or(old.as_ref().map(|m| m.timer)).unwrap_or(true);
@@ -924,7 +1000,7 @@ pub fn install(timer_flag: Option<bool>) -> u8 {
         });
     }
     if write_atomic(&share, MANIFEST, man.render().as_bytes(), 0o600).is_err() {
-        return refuse(CMD, "the manifest cannot be written");
+        return back_out("the manifest cannot be written");
     }
 
     for p in Part::ALL {
@@ -948,6 +1024,7 @@ pub fn install(timer_flag: Option<bool>) -> u8 {
     }
 
     let timer_line;
+    let mut timer_as_asked = true;
     let mut extra = Vec::new();
     match systemctl() {
         Ok(sc) => {
@@ -968,6 +1045,7 @@ pub fn install(timer_flag: Option<bool>) -> u8 {
                     "timer: off (--no-timer); tools that call get --refresh start fetches".into()
                 };
             } else {
+                timer_as_asked = false;
                 timer_line = format!("timer: systemctl --user {} failed: {msg}", args.join(" "));
             }
         }
@@ -984,7 +1062,10 @@ pub fn install(timer_flag: Option<bool>) -> u8 {
                 (true, true) => format!(
                     "timer: enabled; it starts with your systemd user manager ({why}: at your next login)"
                 ),
-                (true, false) => format!("timer: NOT enabled ({why})"),
+                (true, false) => {
+                    timer_as_asked = false;
+                    format!("timer: NOT enabled ({why})")
+                }
                 (false, _) => {
                     "timer: off (--no-timer); tools that call get --refresh start fetches".into()
                 }
@@ -1011,6 +1092,13 @@ pub fn install(timer_flag: Option<bool>) -> u8 {
         say(&format!("note: {n}"));
     }
     say(STATUSLINE_NOTE);
+    if !timer_as_asked {
+        warn(&format!(
+            "install: the files are installed, but the timer is not {} as asked: run claude-usage install again once systemd works",
+            if timer { "enabled" } else { "off" }
+        ));
+        return 3;
+    }
     0
 }
 
@@ -1293,8 +1381,18 @@ pub fn uninstall(purge: bool) -> u8 {
         }
     }
     // 2. The program: a running get then spawns nothing, a fetch creates no state folder.
-    let bin = open_dir(&home, BIN_DIR, false).ok().flatten();
-    let units = open_dir(&home, UNIT_DIR, false).ok().flatten();
+    // Its own files it could not remove, or a folder it cannot open: the manifest stays
+    // (pending uninstall) and the run stops, so a rerun still knows them.
+    let mut stuck = Vec::new();
+    let mut folder = |rel: &str| match open_dir(&home, rel, false) {
+        Ok(d) => d,
+        Err(m) => {
+            stuck.push(m);
+            None
+        }
+    };
+    let bin = folder(BIN_DIR);
+    let units = folder(UNIT_DIR);
     let mut kept = Vec::new();
     let mut take = |dir: &Option<OwnedFd>, p: Part| {
         let Some(d) = dir else { return };
@@ -1304,7 +1402,7 @@ pub fn uninstall(purge: bool) -> u8 {
                 if remove(d, p.file()) {
                     say(&format!("removed {}", p.shown()));
                 } else {
-                    kept.push(format!("{} could not be removed", p.shown()));
+                    stuck.push(format!("{} could not be removed", p.shown()));
                 }
             }
             Current::Hash(_) => kept.push(format!("kept {}: changed since the install", p.shown())),
@@ -1344,6 +1442,12 @@ pub fn uninstall(purge: bool) -> u8 {
     if let Ok(sc) = &sc {
         let _ = sc.run(&["daemon-reload"]);
         let _ = sc.run(&["reset-failed", SERVICE_UNIT]);
+    }
+    if !stuck.is_empty() {
+        for k in &kept {
+            say(k);
+        }
+        return stopped(CMD, &stuck.join("; "));
     }
     // 5. The state, with --purge.
     if purge && let Err(code) = finish_state(&home, state_root, false) {
@@ -1414,7 +1518,19 @@ fn finish_state(home: &Path, root: Option<OwnedFd>, take_locks: bool) -> Result<
     };
     let keys = match state_shape(&root) {
         Ok(k) => k,
-        Err(m) => return Err(refuse(CMD, &format!("--purge: ~/{STATE_DIR}/{NAME}/: {m}"))),
+        // Nothing removed yet when this run took the locks itself (no manifest); else the
+        // program and units are gone and the manifest stays pending.
+        Err(m) if take_locks => {
+            return Err(refuse(CMD, &format!("--purge: ~/{STATE_DIR}/{NAME}/: {m}")));
+        }
+        Err(m) => {
+            return Err(stopped(
+                CMD,
+                &format!(
+                    "--purge: ~/{STATE_DIR}/{NAME}/ changed: {m}; it stays (without --purge, uninstall finishes and keeps it)"
+                ),
+            ));
+        }
     };
     for (k, fd) in keys {
         for n in sys::names(fd.as_fd()).unwrap_or_default() {
@@ -1511,6 +1627,7 @@ mod tests {
             good.replace("version 0.1.0", "version 0.1.0 x"),
             good.replace("version 0.1.0", "version ../x/y"),
             good.replace("pending install", "pending install\npending uninstall"),
+            good.replace("pending install\n", ""),
         ] {
             assert_eq!(Manifest::parse(&bad), None, "{bad}");
         }

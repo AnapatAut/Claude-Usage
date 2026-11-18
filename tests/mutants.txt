@@ -215,7 +215,7 @@ fails: an install stopped part-way
 name: manifest-not-first
 file: src/install.rs
 from:     if write_atomic(&share, MANIFEST, man.render().as_bytes(), 0o600).is_err() {
-from:         return refuse(CMD, "the manifest cannot be written");
+from:         return back_out("the manifest cannot be written");
 from:     }
 from:
 from:     for p in Part::ALL {
@@ -224,10 +224,14 @@ to:     for p in Part::ALL {
 suite: cli install
 fails: then the earlier release installs over it
 
+# Two layers: the first look makes nothing, and a refusal removes what the run made.
 name: refused-install-makes-folders
 file: src/install.rs
 from:         if let Err(m) = examine(&home, old.as_ref(), b.as_ref(), u.as_ref(), &new) {
 to:         if false && let Err(m) = examine(&home, old.as_ref(), b.as_ref(), u.as_ref(), &new) {
+file: src/install.rs
+from:         let _ = std::fs::remove_dir(d);
+to:         let _ = d;
 suite: cli install
 fails: a refused install leaves no folder behind
 
@@ -238,14 +242,51 @@ to:     let others_write = false;
 suite: cli install
 fails: install: a ~/.local/bin others can write, refused
 
+# Two layers: the first look and the run itself each take the lock.
 name: install-no-lock
 file: src/install.rs
 from:     if sys::flock(share.as_fd(), libc::LOCK_EX | libc::LOCK_NB).is_err() {
 from:         return Err("another install or uninstall is running".into());
 from:     }
 to:
+file: src/install.rs
+from:     if sys::flock(share.as_fd(), libc::LOCK_EX | libc::LOCK_NB).is_err() {
+from:         return refuse(CMD, "another install or uninstall is running");
+from:     }
+to:
 suite: cli install
 fails: while another run holds the lock
+
+name: uninstall-no-lock
+file: src/install.rs
+from:     if let Some(s) = &share
+from:         && sys::flock(s.as_fd(), libc::LOCK_EX | libc::LOCK_NB).is_err()
+to:     if let Some(s) = &share
+to:         && false
+to:         && sys::flock(s.as_fd(), libc::LOCK_EX | libc::LOCK_NB).is_err()
+suite: cli install
+fails: while another run holds the lock
+
+name: uninstall-ignores-stuck
+file: src/install.rs
+from:     if !stuck.is_empty() {
+to:     if false {
+suite: cli install
+fails: uninstall that cannot remove the program
+
+name: refused-install-keeps-made-folders
+file: src/install.rs
+from:         let _ = std::fs::remove_dir(d);
+to:         let _ = d;
+suite: cli install
+fails: a refused install part-way through making folders
+
+name: timer-failure-exits-0
+file: src/install.rs
+from:     if !timer_as_asked {
+to:     if false {
+suite: cli install
+fails: install: the timer cannot be enabled
 
 name: any-link-is-the-timer
 file: src/install.rs
@@ -365,3 +406,24 @@ from: LogLevelMax=notice
 to: LogLevelMax=debug
 suite: sandbox
 fails: routine runs leave no journal line
+
+name: group-members-ignored
+file: src/install.rs
+from:         (Some((group, members)), Some((user, _))) => !members && group == user,
+to:         (Some((group, _)), Some((user, _))) => group == user,
+suite: sandbox
+fails: the same, another user listed in that group: refused
+
+name: acl-ignored
+file: src/install.rs
+from:         && (st.gid != sys::egid() || !private_group(st.gid) || sys::has_access_acl(fd.as_fd()));
+to:         && (st.gid != sys::egid() || !private_group(st.gid));
+suite: sandbox
+fails: the same, an ACL letting another user write: refused
+
+name: home-not-passwd-allowed
+file: src/install.rs
+from:         && paths::canonical(&home) != paths::canonical(&phome)
+to:         && false
+suite: sandbox
+fails: install with a HOME that is not the passwd home

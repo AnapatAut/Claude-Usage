@@ -19,7 +19,7 @@
 #           (another file:, from:, to: group adds a second edit, for a safeguard of two layers)
 #   suite:  unit | cli CASE | sandbox
 #   fails:  the check that must fail: a unit test's name (module::tests::name), or the start of a
-#           cli.sh or sandbox/run.sh check's name
+#           cli.sh or sandbox/run.sh check's name that no other check of the run starts with
 # A from:/to: value is the line after "from: " / "to: " exactly (leading spaces kept).
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -101,22 +101,29 @@ one() {
 		if grep -qxF "test $fa ... FAILED" <<< "$out"; then res="caught       $name"
 		else res="SURVIVED     $name (test $fa did not fail)"; fi
 		;;
-	cli\ *)
-		out=$(cd "$w" && CU_ONLY=${suite#cli } tests/cli.sh 2>&1)
+	cli\ * | sandbox)
+		if [ "$suite" = sandbox ]; then out=$(cd "$w" && sandbox/run.sh 2>&1)
+		else out=$(cd "$w" && CU_ONLY=${suite#cli } tests/cli.sh 2>&1); fi
 		echo "$out" >> "$log"
-		if grep -qF -- "  FAIL  $fa" <<< "$out"; then res="caught       $name"
-		elif grep -qF -- "  ok    $fa" <<< "$out"; then res="SURVIVED     $name"
-		else res="NO CHECK     $name (no check named: $fa)"; fi
-		;;
-	sandbox)
-		out=$(cd "$w" && sandbox/run.sh 2>&1)
-		echo "$out" >> "$log"
-		if grep -qF -- "  FAIL  $fa" <<< "$out"; then res="caught       $name"
-		elif grep -qF -- "  ok    $fa" <<< "$out"; then res="SURVIVED     $name"
-		else res="NO CHECK     $name (no check named: $fa; or the run aborted)"; fi
+		case $(judge "$out" "$fa") in
+		caught) res="caught       $name" ;;
+		survived) res="SURVIVED     $name" ;;
+		many) res="NO CHECK     $name (more than one check starts with: $fa)" ;;
+		*) res="NO CHECK     $name (no check named: $fa; or the run aborted)" ;;
+		esac
 		;;
 	esac
 	finish "$w" "$res"
+}
+# The one check of OUT whose name starts with FA: caught (it failed), survived, none or many.
+judge() {
+	local hits n
+	hits=$(awk -v a="  ok    $2" -v b="  FAIL  $2" 'index($0, a) == 1 || index($0, b) == 1' <<< "$1")
+	n=$(grep -c . <<< "$hits")
+	if [ "$n" = 0 ]; then echo none
+	elif [ "$n" != 1 ]; then echo many
+	elif [[ $hits == "  FAIL"* ]]; then echo caught
+	else echo survived; fi
 }
 finish() {
 	rm -rf "$1"
