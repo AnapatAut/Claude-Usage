@@ -163,17 +163,6 @@ wait_for() { # COND SECONDS: until the condition holds, at most that long
 	return 1
 }
 wait_calls() { wait_for '[ "$(calls)" -ge '"$1"' ]' "$2"; }
-# The most claude-usage fetch processes seen at once over about N/20 s.
-max_fetchers() {
-	local m=0 c i
-	for ((i = 0; i < $1; i++)); do
-		c=$(pgrep -fc "^$CU fetch")
-		[ "$c" -gt "$m" ] && m=$c
-		sleep 0.05
-	done
-	echo "$m"
-}
-
 # How many pids (processes or threads) a command made besides its own: 0 means it spawned
 # nothing. Exact, unlike sampling with pgrep: a wrongly spawned child that exits at once still
 # used a pid. The container's pid namespace holds only this harness.
@@ -209,6 +198,17 @@ cred() {
 		mv -f "$CLAUDE_CONFIG_DIR/.cred.tmp" "$CLAUDE_CONFIG_DIR/.credentials.json"
 }
 cred_inplace() { creds_json "$@" > "$CLAUDE_CONFIG_DIR/.credentials.json"; }
+# Credentials of exactly N bytes: the test token's file with a padding key in front.
+pad_creds() {
+	local base rest h t n
+	base=$(creds_json SECRET-TOKEN-AAA)
+	rest=${base#\{}
+	h='{"pad":"' t="\",$rest"
+	n=$(($1 - ${#h} - ${#t}))
+	printf '%s' "$h"
+	head -c "$n" /dev/zero | tr '\0' A
+	printf '%s' "$t"
+}
 
 # The state folder for the current CLAUDE_CONFIG_DIR, its state file, and edits of it (quiet;
 # false when there is no state to edit).
@@ -412,11 +412,11 @@ case_rate_limited() {
 	ok "a success ends the backoff" 'called 8 && stateq ".backoff_step == 0 and .next_attempt == null and .last_error == null"'
 
 	# Each Retry-After on a fresh backoff (a success before it): seconds, an HTTP date, over 1 h,
-	# smaller than the step, garbage, negative, empty.
+	# smaller than the step, garbage, negative, empty. Aged past the longest wait (1 h) first.
 	n=8
 	for ra in 120 date 7200 30 soon -5 ''; do
 		mode ok
-		age 700
+		age 3700
 		cu fetch
 		mode r429
 		[ "$ra" = date ] && ra=$(date -u -d '+300 sec' '+%a, %d %b %Y %H:%M:%S GMT')
@@ -469,6 +469,11 @@ case_auth_errors() {
 	age 40
 	cu fetch
 	ok "403: no retry with the same credentials" 'called 1'
+	past_floor
+	mode ok
+	cred SECRET-TOKEN-BBB
+	cu fetch
+	ok "403: new credentials end the hold at once" 'called 2 && [ "$(lastcall)" = SECRET-TOKEN-BBB ]'
 
 	reset
 	early 6
@@ -477,6 +482,7 @@ case_auth_errors() {
 	rc=$?
 	getj
 	ok "expired token: exit 0, no call, token_expired" '[ "$rc" = 0 ] && called 0 && jqg ".error == \"token_expired\""'
+	ok "expired token: checked again after an hour (as 401)" 'gap 3600 3602'
 	age_any 40
 	cu fetch
 	getj
@@ -554,6 +560,11 @@ case_http_errors() {
 		gap "$want" $((want + 2)) || good=0
 	done
 	ok "other 4xx: doubling to a 1 h cap" 'called 8 && [ "$good" = 1 ]'
+	past_floor
+	mode ok
+	cred SECRET-TOKEN-BBB
+	cu fetch
+	ok "other 4xx: new credentials end the backoff at once" 'called 9 && [ "$(lastcall)" = SECRET-TOKEN-BBB ]'
 
 	reset
 	mode html
@@ -561,10 +572,15 @@ case_http_errors() {
 	getj
 	ok "HTML with 200: bad_response, backoff 60 s" 'called 1 && jqg ".error == \"bad_response\"" && gap 60 62'
 	reset
-	mode huge
+	mode bigjson
 	cu fetch
 	getj
-	ok "a body over 64 KiB: bad_response" 'called 1 && jqg ".error == \"bad_response\""'
+	ok "valid JSON over 64 KiB: bad_response (the cap, not the parser)" 'called 1 && jqg ".error == \"bad_response\""'
+	reset
+	mode fitjson
+	cu fetch
+	getj
+	ok "valid JSON just under 64 KiB: its numbers" 'called 1 && jqg ".error == null and .windows.five_hour.pct == 30.4"'
 	reset
 	mode oldcurl
 	cu fetch
@@ -586,6 +602,39 @@ case_http_errors() {
 	cu fetch
 	getj
 	ok "curl exit 2 (failed to start): no_curl" '[ "$(runs)" = 1 ] && jqg ".error == \"no_curl\""'
+	good=1
+	for x in x1 x4; do
+		reset
+		mode "$x"
+		cu fetch
+		getj
+		[ "$(runs)" = 1 ] && jqg ".error == \"no_curl\"" || good=0
+	done
+	ok "curl exit 1 and 4: no_curl" '[ "$good" = 1 ]'
+	reset
+	chmod 644 "$T/bin/curl"
+	cu fetch
+	rc=$?
+	chmod 755 "$T/bin/curl"
+	getj
+	ok "a configured curl without the exec bit: exit 0, no_curl" '[ "$rc" = 0 ] && [ "$(runs)" = 0 ] && jqg ".error == \"no_curl\""'
+
+	# The last numbers stay through every kind of failure.
+	reset
+	early 4
+	cu fetch
+	good=1
+	for m in r401 r403 r500 partial html oldcurl x7; do
+		mode ok
+		age 3700
+		cu fetch
+		mode "$m"
+		age 3700
+		cu fetch
+		getj
+		jqg ".error != null and .windows.five_hour.pct == 30.4 and .fetched_at != null" || good=0
+	done
+	ok "401, 403, 5xx, network, bad_response, no_curl: the last numbers kept" '[ "$good" = 1 ] && called 15'
 	reset
 	mode hang
 	s=$(date +%s)
@@ -650,15 +699,40 @@ case_credentials() {
 	getj
 	ok "credentials over 1 MiB: bad_credentials" 'called 0 && jqg ".error == \"bad_credentials\""'
 	reset
+	pad_creds 1048576 > "$CLAUDE_CONFIG_DIR/.credentials.json"
+	cu fetch
+	ok "credentials of exactly 1 MiB: used" 'called 1 && [ "$(stat -c %s "$CLAUDE_CONFIG_DIR/.credentials.json")" = 1048576 ]'
+	reset
+	pad_creds 1048577 > "$CLAUDE_CONFIG_DIR/.credentials.json"
+	cu fetch
+	getj
+	ok "credentials of 1 MiB and one byte: bad_credentials" '[ "$(runs)" = 0 ] && jqg ".error == \"bad_credentials\"" && [ "$(stat -c %s "$CLAUDE_CONFIG_DIR/.credentials.json")" = 1048577 ]'
+	reset
+	early 6
 	printf '{"claudeAiOauth":' > "$CLAUDE_CONFIG_DIR/.credentials.json"
 	cu fetch
 	getj
 	ok "unparsable credentials: bad_credentials" 'called 0 && jqg ".error == \"bad_credentials\""'
+	cred SECRET-TOKEN-AAA
+	past_floor
+	cu fetch
+	ok "after bad_credentials: good ones are used at once, in the same window" 'called 1'
 	reset
 	printf '{"claudeAiOauth":{"accessToken":"SECRET-TOKEN-AAA","expiresAt":"SECRET-REFRESH-X"}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
 	cu_e "$T/err" fetch
 	getj
 	ok "a type error in the credentials: bad_credentials, nothing echoed" 'called 0 && jqg ".error == \"bad_credentials\"" && ! grep -q SECRET "$T/err"'
+	reset
+	early 6
+	chmod 000 "$CLAUDE_CONFIG_DIR/.credentials.json"
+	cu fetch
+	rc=$?
+	getj
+	past_floor
+	m=$(spawned "$CU" get --refresh)
+	ok "credentials that cannot be opened: bad_credentials, then no spawn on every read" '[ "$rc" = 0 ] && called 0 && jqg ".error == \"bad_credentials\"" && [ "$m" = 0 ]'
+	chmod 600 "$CLAUDE_CONFIG_DIR/.credentials.json"
+
 	reset
 	rm -f "$CLAUDE_CONFIG_DIR/.credentials.json"
 	mkfifo "$CLAUDE_CONFIG_DIR/.credentials.json"
@@ -753,6 +827,20 @@ case_accounts() {
 	ok "restore with cp -p: refetched with the restored token" 'called 3 && [ "$(lastcall)" = SECRET-TOKEN-AAA ] && jqg ".windows.five_hour.pct == 30.4"'
 
 	reset
+	early 8
+	cp -p "$CLAUDE_CONFIG_DIR/.credentials.json" "$T/creds/saved-a.json"
+	cu fetch
+	cred SECRET-TOKEN-BBB
+	past_floor
+	mode r429
+	cu fetch
+	cp -p "$T/creds/saved-a.json" "$CLAUDE_CONFIG_DIR/.credentials.json"
+	past_floor
+	cu fetch
+	getj
+	ok "switch, 429, restore: the restored account's numbers back with no call" 'called 2 && jqg ".windows.five_hour.pct == 30.4 and .error == \"rate_limited\""'
+
+	reset
 	early 6
 	cu fetch
 	cred_inplace SECRET-TOKEN-CCC
@@ -771,6 +859,8 @@ case_accounts() {
 	cu fetch
 	getj
 	ok "MCP-only change: no call, numbers back" 'called 1 && jqg ".error == null and .windows.five_hour.pct == 30.4"'
+	m=$(spawned "$CU" get --refresh)
+	ok "MCP-only change: once looked at, get --refresh spawns nothing" '[ "$m" = 0 ] && called 1'
 	chmod 400 "$CLAUDE_CONFIG_DIR/.credentials.json"
 	getj
 	ok "chmod-only change: hidden until a fetch looks" 'jqg "$HIDDEN and .error == \"account_changed\""'
@@ -778,6 +868,26 @@ case_accounts() {
 	cu fetch
 	getj
 	ok "chmod-only change: no call, numbers back" 'called 1 && jqg ".error == null and .windows.five_hour.pct == 30.4"'
+	m=$(spawned "$CU" get --refresh)
+	ok "chmod-only change: once looked at, get --refresh spawns nothing" '[ "$m" = 0 ] && called 1'
+
+	# New credentials during a 429 backoff: one detached fetch looks (no call), then no more.
+	reset
+	early 8
+	cu fetch
+	mode r429
+	age 40
+	cu fetch
+	cred SECRET-TOKEN-BBB
+	past_floor
+	m1=$(spawned "$CU" get --refresh)
+	wait_for '! pgrep -f "^$CU fetch" > /dev/null' 5
+	m2=$(spawned "$CU" get --refresh)
+	getj
+	ok "switch during a 429 backoff: one fetch looks, no call, then nothing spawned" '[ "$m1" -ge 1 ] && [ "$m2" = 0 ] && called 2 && jqg "$HIDDEN and .error == \"account_changed\""'
+	age 70
+	cu fetch
+	ok "switch during a 429 backoff: the new token is called once the backoff ends" 'called 3 && [ "$(lastcall)" = SECRET-TOKEN-BBB ]'
 
 	reset
 	early 6
@@ -856,9 +966,21 @@ case_config() {
 	getj
 	ok "a group-writable config file is ignored: exit 0, no_curl" '[ "$rc" = 0 ] && [ "$(runs)" = 0 ] && jqg ".error == \"no_curl\""'
 	chmod 600 "$HOME/.config/claude-usage/config"
+	past_floor
+	cu fetch
+	ok "no_curl: not checked again within the same window" 'called 0'
 	age_any 40
 	cu fetch
 	ok "no_curl is checked again at the next boundary" 'called 1'
+
+	reset
+	{
+		printf 'curl = %s/bin/curl\n' "$T"
+		head -c 70000 /dev/zero | tr '\0' '#'
+	} > "$HOME/.config/claude-usage/config"
+	cu fetch
+	getj
+	ok "a config file over 64 KiB is ignored: no_curl" '[ "$(runs)" = 0 ] && jqg ".error == \"no_curl\""'
 
 	# /tmp is root's and writable by all: without the owner check, the state would go there
 	# and the call would be made.
@@ -883,6 +1005,10 @@ case_state_folder() {
 	rc=$?
 	getj
 	ok "a symlinked state folder: refused, exit 1, nothing written there" '[ "$rc" = 1 ] && [ "$(runs)" = 0 ] && [ -z "$(ls -A "$T/elsewhere")" ] && jqg "$HIDDEN and .error == \"state_unusable\""'
+	mv "$CLAUDE_CONFIG_DIR/.credentials.json" "$T/creds/away.json"
+	getj
+	mv "$T/creds/away.json" "$CLAUDE_CONFIG_DIR/.credentials.json"
+	ok "state_unusable comes before no_credentials" 'jqg "$HIDDEN and .error == \"state_unusable\""'
 	rm -f "$(SD).refused"
 	m=$(spawned "$CU" get --refresh)
 	r0=$(runs)
@@ -923,7 +1049,9 @@ case_state_folder() {
 	head -c 1M /dev/zero > /small/fill 2> /dev/null
 	cu fetch
 	rc=$?
+	m=$(spawned "$CU" get --refresh)
 	ok "a full state folder: exit 1, no call" '[ "$rc" = 1 ] && called 1'
+	ok "a full state folder: get --refresh spawns nothing more in that window" '[ "$m" = 0 ]'
 	rm -rf /small/fill /small/home
 	export HOME=$home
 
@@ -969,6 +1097,48 @@ case_state_folder() {
 	ok "usage.json a folder: exit 1, no call, state_unusable" '[ "$rc1" = 1 ] && [ "$(runs)" = 0 ] && jqg "$HIDDEN and .error == \"state_unusable\""'
 	ok "a refusal: one <4> line, none on a repeat" '[ "$(wc -l < "$T/err1")" = 1 ] && grep -q "^<4>" "$T/err1" && [ "$rc2" = 1 ] && [ ! -s "$T/err2" ]'
 	ok "a refusal is recorded beside the folder" '[ -f "$(SD).refused" ]'
+	echo write_failed > "$(SD).refused"
+	cu_e "$T/err4" fetch
+	ok "a refusal with another cause than the recorded one: said again" '[ "$(wc -l < "$T/err4")" = 1 ] && grep -q "^<4>" "$T/err4"'
+	rm -f "$(SD).refused"
+	"$CU" fetch 2> /dev/null
+	cu_e "$T/err3" fetch
+	ok "a refusal nobody heard (stderr /dev/null) is said by the next fetch" '[ "$(wc -l < "$T/err3")" = 1 ] && grep -q "^<4>" "$T/err3"'
+
+	reset
+	mkstate
+	mkdir "$(SD)/.lock"
+	cu fetch
+	rc=$?
+	getj
+	m=$(spawned "$CU" get --refresh)
+	ok ".lock not a file: fetch exit 1, no call; get state_unusable, spawns nothing" '[ "$rc" = 1 ] && [ "$(runs)" = 0 ] && jqg "$HIDDEN and .error == \"state_unusable\"" && [ "$m" = 0 ]'
+
+	reset
+	mkdir -p "$T/elsewhere"
+	mkstate
+	ln -s "$T/elsewhere/x" "$(SD)/.lock"
+	cu fetch
+	rc=$?
+	getj
+	ok ".lock a symlink: fetch exit 1, no call, nothing made through it; get state_unusable" '[ "$rc" = 1 ] && [ "$(runs)" = 0 ] && [ ! -e "$T/elsewhere/x" ] && jqg "$HIDDEN and .error == \"state_unusable\""'
+
+	reset
+	early 6
+	cu fetch
+	chmod 755 "$(SD)" "$HOME/.local/state/claude-usage"
+	getj
+	ok "get: folders with a wrong mode are usable and left as they are" 'jqg ".error == null and .windows.five_hour.pct == 30.4" && [ "$(stat -c %a "$(SD)" "$HOME/.local/state/claude-usage" | tr "\n" " ")" = "755 755 " ]'
+	age 40
+	cu fetch
+	ok "fetch sets claude-usage/ and the key folder back to 700" 'called 2 && [ "$(stat -c %a "$(SD)" "$HOME/.local/state/claude-usage" | tr "\n" " ")" = "700 700 " ]'
+
+	reset
+	early 6
+	cu fetch
+	state_edit '.pad = ("a" * 70000)'
+	getj
+	ok "usage.json over 64 KiB: as no state" 'jqg ". == $EMPTY"'
 
 	reset
 	mkstate
@@ -981,9 +1151,10 @@ case_state_folder() {
 	early 6
 	cu fetch
 	: 2> /dev/null > "$(SD)/.usage.json.AbC123" && touch -d '-2 min' "$(SD)/.usage.json.AbC123"
+	: 2> /dev/null > "$(SD)/.usage.json.XyZ789"
 	age 40
 	cu fetch
-	ok "a temp file over 60 s old is removed" 'called 2 && [ ! -e "$(SD)/.usage.json.AbC123" ]'
+	ok "a temp file over 60 s old is removed, a newer one kept" 'called 2 && [ ! -e "$(SD)/.usage.json.AbC123" ] && [ -e "$(SD)/.usage.json.XyZ789" ]'
 
 	reset
 	mkstate
@@ -1053,7 +1224,7 @@ case_refresh() {
 	wait_calls 1 10
 	wait_for '[ "$(state .pending)" = false ]' 10
 	ok "get --refresh starts one fetch" 'called 1 && [ "$(state .fetched_at)" != null ]'
-	ok "the detached fetch: argv 'fetch', no token" '[ -s "$F/parent-cmdline.1" ] && grep -q " fetch " "$F/parent-cmdline.1" && ! grep -q SECRET "$F/parent-cmdline.1"'
+	ok "the detached fetch: argv exactly its own path and fetch" '[ "$(cat "$F/parent-cmdline.1" 2> /dev/null)" = "$CU fetch " ]'
 	ok "the detached fetch runs in its own session" '[ -s "$F/parent-sid.1" ] && [ "$(cat "$F/parent-sid.1")" != "$(ps -o sid= -p $$ | tr -d " ")" ]'
 	past_floor
 	m=$(spawned "$CU" get --refresh)
@@ -1066,13 +1237,16 @@ case_refresh() {
 	e=$((($(date +%s%N) - s) / 1000000))
 	ok "the reader's pipes (stdout, stderr, fd 3) reach EOF at once" '[ "$e" -lt 1500 ] && jqf ".schema == 0" "$T/out.pipe"'
 	wait_calls 1 10
-	m=0
-	for _ in 1 2; do
-		"$CU" get --refresh > /dev/null 2>> "$STDERR"
-		c=$(max_fetchers 6)
-		[ "$c" -gt "$m" ] && m=$c
-	done
-	ok "none started while one runs" '[ "$m" = 1 ] && called 1'
+	m=$(spawned "$CU" get --refresh)
+	m2=$(spawned "$CU" get --refresh)
+	ok "none started while one runs" '[ "$m" = 0 ] && [ "$m2" = 0 ] && called 1'
+
+	# A fetch that runs no curl (no credentials): the pid count is exactly the one fetch.
+	reset
+	rm -f "$CLAUDE_CONFIG_DIR/.credentials.json"
+	m=$(spawned "$CU" get --refresh)
+	wait_for '[ -f "$(SD)/usage.json" ]' 5
+	ok "get --refresh: exactly one process, no thread" '[ "$m" = 1 ] && [ "$(state .last_error)" = no_credentials ]'
 
 	reset
 	mode slow
@@ -1252,6 +1426,7 @@ case_robustness() {
 	"$CU" status > "$T/out.status" 2>> "$STDERR"
 	rc=$?
 	ok "status runs (exit 0, some output)" '[ "$rc" = 0 ] && [ -s "$T/out.status" ]'
+	ok "status warns: this uid has no passwd entry (the timer's home may differ)" 'grep -q "^warning: .*no passwd entry" "$T/out.status"'
 }
 
 # ---------------------------------------------------------------- run

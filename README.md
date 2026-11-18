@@ -7,8 +7,9 @@ themselves: more calls (and HTTP 429 sooner), different numbers in each tool, an
 the OAuth token handling per tool. `claude-usage` is the only program that calls the endpoint.
 Every tool asks it, and every tool works without it.
 
-**Status: under construction.** Nothing here fetches yet; every command answers
-"not implemented". The interface below is a draft (`schema: 0`) and may still change.
+**Status: under construction.** `get`, `fetch` and `status` work; `install` and `uninstall`
+do not yet (they answer "not implemented"), and there are no systemd units yet. The interface
+below is a draft (`schema: 0`) and may still change.
 
 ## Interface (draft)
 
@@ -17,8 +18,8 @@ claude-usage get [--refresh]     the cached numbers as JSON; never touches the n
                                  --refresh also starts a detached fetch when one is due.
 claude-usage fetch [--now]       fetch if due (run by a systemd user timer at :00 and :30)
 claude-usage status              human-readable state
-claude-usage install [--timer | --no-timer] [--status]
-claude-usage uninstall [--purge]
+claude-usage install [--timer | --no-timer] [--status]     (not yet)
+claude-usage uninstall [--purge]                            (not yet)
 ```
 
 `claude-usage get` prints:
@@ -51,12 +52,19 @@ claude-usage uninstall [--purge]
 - systemd user services for the timer (optional: tools that call `get --refresh` start fetches
   themselves while someone looks).
 
-## Security (design; not built yet)
+## Security
 
-- The OAuth token will be read from Claude Code's credentials file at fetch time and given to
-  curl on its standard input: never on a command line, in the environment, a file or a log.
-- `claude-usage` will never write, refresh or copy Claude Code's credentials.
-- Its own state will be owner-only, under `~/.local/state/claude-usage/`.
+- The OAuth token is read from Claude Code's credentials file at fetch time and given to curl
+  on its standard input: never on a command line, in the environment, a file or a log. The
+  buffers that held it are zeroed before they are freed.
+- `claude-usage` never writes, refreshes or copies Claude Code's credentials. `get` only
+  `stat`s the file.
+- curl is never looked up on `PATH`: `/usr/bin/curl`, `/bin/curl` or `/usr/local/bin/curl` in
+  root-owned folders, run with `-q` (no `.curlrc`), an empty environment and no redirects.
+- Its own state is owner-only, under `~/.local/state/claude-usage/`, written through folder
+  file descriptors (no symlink is followed there).
+- Every write refuses to run as root, setuid, or with a `$HOME` or credentials file that is not
+  the user's. The process is not dumpable and makes no core dumps.
 
 ## Development
 

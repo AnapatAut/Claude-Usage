@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Lint: rustfmt and clippy (through scripts/cargo, in a container), bash syntax and shellcheck
-# of every tracked shell script, and the privacy check of every tracked file and its name.
+# Lint: rustfmt and clippy (through scripts/cargo, in a container), no Debug formatting in
+# src/, bash syntax and shellcheck of every tracked shell script, and the privacy check of every
+# tracked file and its name.
 # The shellcheck used is the installed one, else koalaman/shellcheck v0.10.0 pinned by digest, in
 # a container with no network and the repo read-only (`docker image rm` it to free the space).
 # SC2015 (A && B || C) is allowed, as in Agent-Session-Control, whose privacy checker is used here.
@@ -47,8 +48,15 @@ shellcheck_all() {
 	fi
 }
 
+# Debug formatting could print a credential type: none in src/, except a line that says why
+# with "lint-allow: debug".
+no_debug_format() {
+	! git grep -nE ':#?\?\}|dbg!\(' -- 'src/*.rs' | grep -v 'lint-allow: debug'
+}
+
 check "cargo fmt" scripts/cargo fmt --check
 check "cargo clippy" scripts/cargo clippy --all-targets --locked -- -D warnings
+check "no Debug formatting in src" no_debug_format
 check "bash syntax" bash_syntax
 check "shellcheck" shellcheck_all
 check "privacy" tools/privacy-check.sh --tree

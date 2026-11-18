@@ -107,7 +107,9 @@ r403) printf '{"error":{"type":"permission_error"}}' && tail_ 403 "" ;;
 r404) printf '{"error":{"type":"not_found_error"}}' && tail_ 404 "" ;;
 r500) printf '{"error":{"type":"api_error"}}' && tail_ 500 "" ;;
 html) printf '<html><body>moved</body></html>' && tail_ 200 "" ;;
-huge) head -c 100000 /dev/zero | tr '\0' a && tail_ 200 "" ;;
+# Valid JSON padded past the 64 KiB cap, and just under it.
+bigjson) printf '{"pad":"%s",' "$(head -c 70000 /dev/zero | tr '\0' a)" && ok_body | cut -c2- && tail_ 200 "" ;;
+fitjson) printf '{"pad":"%s",' "$(head -c 60000 /dev/zero | tr '\0' a)" && ok_body | cut -c2- && tail_ 200 "" ;;
 oldcurl) ok_body && printf '\n200 %%header{retry-after}' ;;
 # As real curl does on a timeout: part of a body, the -w tail with status 000, exit 28.
 partial)
@@ -115,7 +117,9 @@ partial)
 	tail_ 000 ""
 	exit 28
 	;;
+x1) exit 1 ;;
 x2) exit 2 ;;
+x4) exit 4 ;;
 x7) exit 7 ;;
 *)
 	echo "fake curl: unknown mode $mode" >&2

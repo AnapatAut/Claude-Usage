@@ -1,9 +1,26 @@
 //! claude-usage: one shared, cached fetcher for Claude usage limits.
 //!
-//! This is the command shape only; every command still answers "not implemented".
+//! `get`, `fetch` and `status` are built; `install` and `uninstall` still answer "not
+//! implemented".
+
+mod config;
+mod creds;
+mod curl;
+mod detach;
+mod fetch;
+mod get;
+mod lock;
+mod parse;
+mod paths;
+mod schedule;
+mod secret;
+mod state;
+mod status;
+mod sys;
 
 use std::io::Write;
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const USAGE: &str = "\
 usage: claude-usage get [--refresh]
@@ -130,7 +147,17 @@ fn err(text: &str) {
     let _ = std::io::stderr().lock().write_all(text.as_bytes());
 }
 
+/// Unix seconds.
+pub fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
 fn main() -> ExitCode {
+    sys::harden();
+    // A fixed line, never the panic's payload (it could hold a value).
+    std::panic::set_hook(Box::new(|_| err("<3>claude-usage: internal error\n")));
     let raw: Vec<String> = match std::env::args_os()
         .skip(1)
         .map(|a| a.into_string())
@@ -146,6 +173,9 @@ fn main() -> ExitCode {
     match parse(&args) {
         Ok(Command::Help) => out(USAGE),
         Ok(Command::Version) => out(&format!("claude-usage {}\n", env!("CARGO_PKG_VERSION"))),
+        Ok(Command::Get { refresh }) => ExitCode::from(get::run(refresh)),
+        Ok(Command::Fetch { now }) => ExitCode::from(fetch::run(now)),
+        Ok(Command::Status) => ExitCode::from(status::run()),
         Ok(cmd) => {
             err(&format!(
                 "claude-usage: {}: not implemented yet\n",
