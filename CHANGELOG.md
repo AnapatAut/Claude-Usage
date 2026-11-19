@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Security
+- The config file (`curl =`) is read only when `$HOME` is the user's home in the passwd file
+  (both canonical); with no passwd entry it is ignored. A tool that sets `HOME` to a folder of
+  a repository while `CLAUDE_CONFIG_DIR` names the real credentials can no longer choose the
+  curl that gets the token. `status` says when it ignores a config file.
+
+### Changed
+- `tests/cli.sh` gives the container a passwd file of its own, so each case sets its uid's
+  entry (or none). cli: 268 checks; mutants: 54.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added

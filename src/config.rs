@@ -1,8 +1,12 @@
 //! The optional config file `$HOME/.config/claude-usage/config`: lines `key = value`, `#` starts
-//! a comment. Read only when it is a regular file of the user's, not writable by group or
-//! others, at most 64 KiB; otherwise ignored, as if absent. v1 key: `curl = /absolute/path`.
+//! a comment. Read only when `$HOME` is the user's home in the passwd file and the file is a
+//! regular file of the user's, not writable by group or others, at most 64 KiB; otherwise
+//! ignored, as if absent. v1 key: `curl = /absolute/path`.
+//! The passwd rule: a project tool that sets `HOME` to a folder of a repository (while
+//! `CLAUDE_CONFIG_DIR` still names the real credentials) must not choose the curl that gets the
+//! token.
 
-use crate::sys;
+use crate::{paths, sys};
 use std::io::Read;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
@@ -15,7 +19,16 @@ pub struct Config {
     pub curl: Option<PathBuf>,
 }
 
+/// Whether a config file under `home` may be read: `home` is the passwd home of the effective
+/// user (both canonical). No passwd entry: no.
+pub fn honoured(home: &Path) -> bool {
+    sys::passwd_home(sys::euid()).is_some_and(|p| paths::canonical(home) == paths::canonical(&p))
+}
+
 pub fn read(home: &Path) -> Config {
+    if !honoured(home) {
+        return Config::default();
+    }
     let p = home.join(".config/claude-usage/config");
     let Ok(fd) = sys::open(&p, libc::O_RDONLY | libc::O_NONBLOCK) else {
         return Config::default();

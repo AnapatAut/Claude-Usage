@@ -104,6 +104,9 @@ the timer is not as asked).
   `stat`s the file.
 - curl is never looked up on `PATH`: `/usr/bin/curl`, `/bin/curl` or `/usr/local/bin/curl` in
   root-owned folders, run with `-q` (no `.curlrc`), an empty environment and no redirects.
+  Another curl can be named in `~/.config/claude-usage/config` (`curl = /absolute/path`, in
+  folders only you or root can write). That file is read only when `$HOME` is your home in the
+  passwd file, so a tool that points `HOME` into a project cannot choose the curl.
 - Its own state is owner-only, under `~/.local/state/claude-usage/`, written through folder
   file descriptors (no symlink is followed there).
 - Every write (`fetch`, `install`, `uninstall`) refuses to run as root, setuid, or with a
