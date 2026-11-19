@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Fake curl for tests/cli.sh. It never touches the network. Installed as $T/bin/curl, it keeps
+# its records in $T/fake/ (claude-usage clears curl's environment, so the folder comes from its
+# own path):
+#   n                     number of runs (each run, accepted or not, counts)
+#   argv.N env.N cwd.N    its arguments, environment and working folder
+#   fds.N                 open fds other than 0, 1, 2 (and 255, bash's own script fd)
+#   core.N                its core size limit (ulimit -c)
+#   parent-cmdline.N      claude-usage's command line (read from /proc)
+#   parent-environ.N      "hidden" when claude-usage's /proc environ cannot be read (not dumpable)
+#   parent-sid.N          claude-usage's session id
+#   stdin.N               stdin, saved only when it is exactly one test-token header line
+#   calls                 one line per accepted call: the token
+#   argv-mismatch         a line per run whose arguments were not the fixed list (then exit 97)
+#   refused               a line per run whose stdin was not one test-token header line (then
+#                         exit 99, nothing of it saved: a harness slip can never store a real
+#                         token)
+#   mode                  how to answer (below); retry_after: the Retry-After value for r429
+#   during                if executable, run while the "request" is in flight
+# It answers like `curl -o - -w '\n%{http_code} %header{retry-after}'`: the body, a newline,
+# the status and the header value (empty when absent).
+set -u
+D=$(cd "$(dirname "$0")/.." && pwd)
+F=$D/fake
+[ -d "$F" ] || exit 96
+ls "/proc/$$/fd" > "$F/.fds.$$" 2> /dev/null
+exec 8>> "$F/.lock"
+flock 8
+n=$(($(cat "$F/n" 2> /dev/null || echo 0) + 1))
+echo "$n" > "$F/n"
+exec 8>&-
+grep -vxE '0|1|2|255' "$F/.fds.$$" | tr '\n' ' ' > "$F/fds.$n"
+rm -f "$F/.fds.$$"
+printf '%s\n' "$@" > "$F/argv.$n"
+tr '\0' '\n' < "/proc/$$/environ" > "$F/env.$n" 2> /dev/null
+pwd -P > "$F/cwd.$n"
+ulimit -c > "$F/core.$n"
+tr '\0' ' ' < "/proc/$PPID/cmdline" > "$F/parent-cmdline.$n" 2> /dev/null
+if (: < "/proc/$PPID/environ") 2> /dev/null; then echo readable; else echo hidden; fi > "$F/parent-environ.$n"
+ps -o sid= -p "$PPID" | tr -d ' ' > "$F/parent-sid.$n"
+
+want=(-q -sS --max-time 5 --connect-timeout 3 --proto '=https' --max-redirs 0
+	-H @- -H 'anthropic-beta: oauth-2025-04-20'
+	-o - -w '\n%{http_code} %header{retry-after}'
+	https://api.anthropic.com/api/oauth/usage)
+same=1
+[ "$#" = "${#want[@]}" ] || same=0
+if [ "$same" = 1 ]; then
+	i=0
+	for a in "$@"; do
+		[ "$a" = "${want[$i]}" ] || same=0
+		i=$((i + 1))
+	done
+fi
+if [ "$same" = 0 ]; then
+	echo "run $n" >> "$F/argv-mismatch"
+	exit 97
+fi
+
+mode=$(cat "$F/mode" 2> /dev/null || echo ok)
+# Never reads stdin: claude-usage's watchdog must end it.
+if [ "$mode" = nostdin ]; then
+	for ((i = 0; i < 600; i++)); do sleep 0.1; done
+	exit 0
+fi
+in=$(
+	head -c 8192
+	echo x
+)
+in=${in%x}
+line=${in%$'\n'}
+tok=''
+re='^Authorization: Bearer (SECRET-TOKEN-[A-Z]{3})$'
+if [ "$in" = "$line"$'\n' ] && [[ $line =~ $re ]]; then tok=${BASH_REMATCH[1]}; fi
+if [ -z "$tok" ]; then
+	echo "run $n" >> "$F/refused"
+	exit 99
+fi
+printf '%s' "$in" > "$F/stdin.$n"
+echo "$tok" >> "$F/calls"
+[ -x "$F/during" ] && "$F/during"
+
+iso() { date -u -d "$1" +%Y-%m-%dT%H:%M:%S.123456+00:00; }
+ok_body() {
+	local p=30.4
+	case $tok in SECRET-TOKEN-BBB) p=80 ;; SECRET-TOKEN-CCC) p=55 ;; esac
+	printf '{"five_hour":{"utilization":%s,"resets_at":"%s"},"seven_day":{"utilization":12,"resets_at":"%s"},"unknown_window":{"utilization":1}}' \
+		"$p" "$(iso '+2 hours')" "$(iso '+3 days')"
+}
+tail_() { printf '\n%s %s' "$1" "$2"; }
+case $mode in
+ok) ok_body && tail_ 200 "" ;;
+idle) printf '{"five_hour":{"utilization":0,"resets_at":null},"seven_day":null}' && tail_ 200 "" ;;
+slow) sleep 3 && ok_body && tail_ 200 "" ;;
+# A body that trickles out a byte every 0.1 s for a minute: only the watchdog ends it.
+trickle)
+	printf '{"five_hour":'
+	for ((i = 0; i < 600; i++)); do
+		sleep 0.1
+		printf ' '
+	done
+	;;
+hang) for ((i = 0; i < 600; i++)); do sleep 0.1; done ;;
+r429) printf '{"error":{"type":"rate_limit_error"}}' && tail_ 429 "$(cat "$F/retry_after" 2> /dev/null)" ;;
+r401) printf '{"error":{"type":"authentication_error"}}' && tail_ 401 "" ;;
+r403) printf '{"error":{"type":"permission_error"}}' && tail_ 403 "" ;;
+r404) printf '{"error":{"type":"not_found_error"}}' && tail_ 404 "" ;;
+r500) printf '{"error":{"type":"api_error"}}' && tail_ 500 "" ;;
+html) printf '<html><body>moved</body></html>' && tail_ 200 "" ;;
+# Valid JSON padded past the 64 KiB cap, and just under it.
+bigjson) printf '{"pad":"%s",' "$(head -c 70000 /dev/zero | tr '\0' a)" && ok_body | cut -c2- && tail_ 200 "" ;;
+fitjson) printf '{"pad":"%s",' "$(head -c 60000 /dev/zero | tr '\0' a)" && ok_body | cut -c2- && tail_ 200 "" ;;
+oldcurl) ok_body && printf '\n200 %%header{retry-after}' ;;
+# As real curl does on a timeout: part of a body, the -w tail with status 000, exit 28.
+partial)
+	printf '{"five_hour":{"utiliz'
+	tail_ 000 ""
+	exit 28
+	;;
+x1) exit 1 ;;
+x2) exit 2 ;;
+x4) exit 4 ;;
+x7) exit 7 ;;
+*)
+	echo "fake curl: unknown mode $mode" >&2
+	exit 98
+	;;
+esac

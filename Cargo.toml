@@ -1,6 +1,6 @@
 [package]
 name = "claude-usage"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -8,7 +8,13 @@ description = "One shared, cached fetcher for Claude usage limits"
 repository = "https://github.com/AnapatAut/Claude-Usage"
 publish = false
 
+# Decision 2 of the design: these four, no others. serde without `derive` (no proc-macro
+# crates); serde_json's `raw_value` borrows the claudeAiOauth object for the fingerprint.
 [dependencies]
+libc = "0.2"
+serde = { version = "1", default-features = false, features = ["std"] }
+serde_json = { version = "1", default-features = false, features = ["std", "raw_value"] }
+sha2 = { version = "0.11", default-features = false }
 
 [profile.release]
 panic = "abort"

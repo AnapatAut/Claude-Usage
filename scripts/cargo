@@ -1,66 +1,166 @@
 #!/usr/bin/env bash
 # Run cargo for this repo inside a throwaway container, never on the host.
-#   scripts/cargo <cargo args…>     e.g. scripts/cargo build --release, scripts/cargo test
-#   scripts/cargo --down            remove what this script made: the image and both volumes
+#   scripts/cargo <subcommand> [args…]   e.g. scripts/cargo build --release, scripts/cargo test
+#   scripts/cargo --down                 remove the image and the crate cache (waits for runs)
 #
 # The image cu-rust:1.99.1 is rust:1.99-alpine, pinned by digest (rustc 1.99.1, musl host, so
-# builds are static), plus rustfmt and clippy. It is made once, with network, by
-# `docker commit` of a one-off container: no build cache is left behind.
+# binaries are static), plus rustfmt and clippy. It is made once, with network, by
+# `docker commit` of a one-off container (no build cache left behind), and labelled with the
+# base digest: an image of that name without the label is refused, never used.
 #
-# Every run: the source read-only, target/ and the crate cache in the volumes cu-target and
-# cu-cargo-cache, your uid, no capabilities, no new privileges, a read-only root, no network
-# (cargo offline). Exceptions: `fetch`, `generate-lockfile` and `update` get the network and a
-# writable source (they write Cargo.lock); `fmt` without --check gets a writable source.
+# Every run is a new container: --init (Ctrl-C stops it), your uid, no capabilities, no new
+# privileges, a read-only root, memory, pids and tmpfs sizes capped, no image pull, the
+# toolchain pinned by RUSTUP_TOOLCHAIN (a rust-toolchain.toml cannot pick another).
+#
+# Build modes (build, test, clippy, fmt, …): no network, cargo offline.
+#   - The source read-only at /src; .git hidden (an empty root-owned tmpfs, or /dev/null for a
+#     worktree's .git file).
+#   - ./target read-write at /target, so a build lands there. A symlinked, tracked or foreign
+#     target is refused: build code could otherwise write through it into the checkout.
+#   - CARGO_HOME a fresh tmpfs. The crate cache (volume cu-cargo-registry-<uid>) read-only.
+#   - fmt and clippy run cargo-fmt / cargo-clippy directly: a cargo alias in a tracked
+#     .cargo/config.toml can shadow those two (not the built-in commands).
+#   - `fmt` without --check: the source writable (.git still hidden).
+# Network modes (fetch, generate-lockfile, update): only the Cargo.toml and Cargo.lock files
+# git tracks go in, on stdin (no mount of the checkout, no .cargo/, no toolchain file), with
+# stub targets; the crate cache read-write; only Cargo.lock comes back (checked, then moved in
+# place: review it with git diff). Run `scripts/cargo fetch` after changing dependencies.
+# Git dependencies are not supported (CARGO_HOME/git is not kept).
+#
+# Locks: setup, --down and the network modes take an exclusive lock, build modes a shared one,
+# held until the run ends; so --down waits for running builds and the cache has one writer.
+# Build output and the crate cache persist: after building untrusted code, run
+# `scripts/cargo clean` and `scripts/cargo --down`.
 set -euo pipefail
 BASE=rust@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 # rust:1.99-alpine
 TOOLCHAIN=1.99.1-x86_64-unknown-linux-musl
 IMG=cu-rust:1.99.1
-SETUP=cu-rust-setup
-VOLS=(cu-target cu-cargo-cache)
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 die() { echo "scripts/cargo: $*" >&2; exit 2; }
-command -v docker >/dev/null || die "docker not found"
-
-if [ "${1:-}" = --down ]; then
-	docker rm -f "$SETUP" >/dev/null 2>&1 || true
-	docker volume rm -f "${VOLS[@]}" >/dev/null
-	docker image rm -f "$IMG" >/dev/null 2>&1 || true
-	echo "scripts/cargo: removed $IMG and the volumes ${VOLS[*]}"
-	exit 0
-fi
-[ $# -gt 0 ] || die "usage: scripts/cargo <cargo args…> | --down"
+for c in docker flock git; do command -v "$c" > /dev/null || die "$c not found"; done
 uid=$(id -u) gid=$(id -g)
 [ "$uid" != 0 ] || die "refusing to run as root"
+case $REPO in *,*) die "the repo path must not contain a comma (docker --mount): $REPO" ;; esac
+VOL=cu-cargo-registry-$uid
+LOCKDIR=${XDG_RUNTIME_DIR:-$HOME/.cache}
+mkdir -p "$LOCKDIR"
 
-if ! docker image inspect "$IMG" >/dev/null 2>&1; then
-	had=1
-	docker image inspect "$BASE" >/dev/null 2>&1 || had=0
-	docker rm -f "$SETUP" >/dev/null 2>&1 || true
+# Undo a step that stopped part way (an error, Ctrl-C): a setup container, a half-made volume,
+# a base image pulled only for setup, a network-mode container, a temp file.
+setup='' pulled='' newvol='' ctr='' new=''
+cleanup() {
+	[ -z "$setup" ] || docker rm -f "$setup" > /dev/null 2>&1 || true
+	[ -z "$newvol" ] || docker volume rm -f "$newvol" > /dev/null 2>&1 || true
+	[ -z "$pulled" ] || docker image rm "$BASE" > /dev/null 2>&1 || true
+	[ -z "$ctr" ] || docker rm -f "$ctr" > /dev/null 2>&1 || true
+	[ -z "$new" ] || rm -f "$new"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
+
+exec 9> "$LOCKDIR/cu-rust.lock"
+flock 9
+
+if [ "${1:-}" = --down ]; then
+	docker volume rm -f "$VOL" > /dev/null
+	if [ "$(docker image inspect -f '{{index .Config.Labels "cu.base"}}' "$IMG" 2> /dev/null)" = "$BASE" ]; then
+		docker image rm "$IMG" > /dev/null
+	fi
+	echo "scripts/cargo: removed $IMG and the volume $VOL (./target is left alone)"
+	exit 0
+fi
+[ $# -gt 0 ] || die "usage: scripts/cargo <subcommand> [args…] | --down"
+case $1 in
+-* | +*) die "put cargo's options after the subcommand: scripts/cargo <subcommand> [options]" ;;
+esac
+
+if docker image inspect "$IMG" > /dev/null 2>&1; then
+	[ "$(docker image inspect -f '{{index .Config.Labels "cu.base"}}' "$IMG")" = "$BASE" ] ||
+		die "an image $IMG exists that this script did not make: remove it (docker image rm $IMG)"
+else
+	docker image inspect "$BASE" > /dev/null 2>&1 || pulled=1
+	setup=cu-rust-setup-$$
 	echo "scripts/cargo: making $IMG (once; needs network)" >&2
-	docker run --name "$SETUP" "$BASE" rustup component add --toolchain "$TOOLCHAIN" rustfmt clippy >&2
-	docker commit --change 'CMD ["sh"]' "$SETUP" "$IMG" >/dev/null
-	docker rm "$SETUP" >/dev/null
+	docker run --name "$setup" "$BASE" rustup component add --toolchain "$TOOLCHAIN" rustfmt clippy >&2
+	docker commit --change "LABEL cu.base=$BASE" --change 'CMD ["sh"]' "$setup" "$IMG" > /dev/null
+	docker rm "$setup" > /dev/null
+	setup=''
 	# The base was pulled only for this: drop its name (the new image keeps the layers).
-	[ "$had" = 1 ] || docker image rm "$BASE" >/dev/null
+	if [ -n "$pulled" ]; then docker image rm "$BASE" > /dev/null; pulled=''; fi
+fi
+if docker volume inspect "$VOL" > /dev/null 2>&1; then
+	[ "$(docker volume inspect -f '{{index .Labels "cu.owner"}}' "$VOL")" = "$uid" ] ||
+		die "a volume $VOL exists that this script did not make for uid $uid: run scripts/cargo --down"
+else
+	newvol=$VOL
+	docker volume create --label "cu.owner=$uid" "$VOL" > /dev/null
+	# A new volume is root's: hand it to the user (removed again if this does not finish).
+	docker run --rm --pull never --network none --mount "type=volume,src=$VOL,dst=/v" "$IMG" chown "$uid:$gid" /v
+	newvol=''
 fi
 
-for v in "${VOLS[@]}"; do
-	if ! docker volume inspect "$v" >/dev/null 2>&1; then
-		docker volume create "$v" >/dev/null
-		# A new volume is root's: hand it to the user once.
-		docker run --rm --network none -v "$v:/v" "$IMG" chown "$uid:$gid" /v
-	fi
-done
+run=(docker run --rm --init --pull never --user "$uid:$gid"
+	--memory 4g --memory-swap 4g --pids-limit 1024
+	--cap-drop ALL --security-opt no-new-privileges --read-only
+	--tmpfs /tmp:size=1g --tmpfs "/cargo:size=64m,uid=$uid,gid=$gid,mode=0700"
+	-e HOME=/tmp -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target
+	-e RUSTUP_TOOLCHAIN="$TOOLCHAIN" -e TINI_KILL_PROCESS_GROUP=1)
 
-net=none ro=:ro offline=true
 case $1 in
-fetch | generate-lockfile | update) net=bridge ro= offline=false ;;
-fmt) [[ " $* " == *" --check "* ]] || ro= ;;
+fetch | generate-lockfile | update)
+	# Exclusive lock kept: the only writer of the crate cache. Only the manifests go in.
+	cd "$REPO"
+	files=$(git ls-files -- Cargo.lock ':(glob)**/Cargo.toml' | tr '\n' ' ')
+	[ -n "$files" ] || die "git tracks no Cargo.toml"
+	new=$(mktemp "$REPO/.Cargo.lock.XXXXXX")
+	ctr=cu-cargo-net-$$
+	# shellcheck disable=SC2016 # expanded by the container's shell
+	git ls-files -z -- Cargo.lock ':(glob)**/Cargo.toml' | tar --null -T - -cf - |
+		"${run[@]}" -i --name "$ctr" --network bridge -e CARGO_NET_OFFLINE=false \
+			--mount "type=volume,src=$VOL,dst=/cargo/registry" -w /tmp "$IMG" sh -euc '
+		mkdir w && cd w && tar -xf -
+		for m in $(find . -name Cargo.toml); do
+			d=${m%/Cargo.toml}
+			mkdir -p "$d/src" && echo "fn main() {}" > "$d/src/main.rs"
+		done
+		cargo "$@" >&2
+		cat Cargo.lock' sh "$@" | head -c 4194304 > "$new"
+	ctr=''
+	head -n 1 "$new" | grep -qx '# This file is automatically @generated by Cargo.' ||
+		die "what came back is not a Cargo.lock: left alone"
+	chmod 0644 "$new"
+	mv -f "$new" "$REPO/Cargo.lock"
+	new=''
+	exit 0
+	;;
 esac
-tty=()
-[ -t 0 ] && [ -t 1 ] && tty=(-t)
-exec docker run --rm "${tty[@]}" --network "$net" --user "$uid:$gid" \
-	--cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
-	-e HOME=/tmp -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -e CARGO_NET_OFFLINE="$offline" \
-	-v "$REPO:/src$ro" -v cu-target:/target -v cu-cargo-cache:/cargo -w /src \
-	"$IMG" cargo "$@"
+
+# Build modes. ./target must be a real folder of this checkout, owned by the user.
+T=$REPO/target
+[ ! -L "$T" ] || die "target is a symlink: refused (build code could write through it)"
+[ -z "$(git -C "$REPO" ls-files -- target)" ] || die "git tracks target: refused"
+mkdir -p "$T"
+[ "$(cd "$T" && pwd -P)" = "$T" ] && [ -O "$T" ] || die "target is not a folder of this checkout owned by you: refused"
+hide_git=()
+if [ -d "$REPO/.git" ] && ! [ -L "$REPO/.git" ]; then
+	hide_git=(--mount "type=tmpfs,dst=/src/.git,tmpfs-size=4096,tmpfs-mode=0555")
+elif [ -f "$REPO/.git" ] && ! [ -L "$REPO/.git" ]; then
+	hide_git=(--mount "type=bind,src=/dev/null,dst=/src/.git,readonly")
+fi
+src=(--mount "type=bind,src=$REPO,dst=/src,readonly")
+cmd=(cargo "$@")
+case $1 in
+fmt)
+	cmd=(cargo-fmt "${@:2}")
+	[[ " $* " == *" --check "* ]] || src=(--mount "type=bind,src=$REPO,dst=/src")
+	;;
+clippy) cmd=(cargo-clippy clippy "${@:2}") ;;
+esac
+[ -t 0 ] && [ -t 1 ] && [ -t 2 ] && run+=(-t)
+# Shared lock, held by docker until the run ends (fd 9 stays open across exec).
+flock -s 9
+trap - EXIT INT TERM HUP
+exec "${run[@]}" --network none -e CARGO_NET_OFFLINE=true \
+	--mount "type=volume,src=$VOL,dst=/cargo/registry,readonly" \
+	--mount "type=bind,src=$T,dst=/target" "${src[@]}" "${hide_git[@]}" -w /src \
+	"$IMG" "${cmd[@]}"

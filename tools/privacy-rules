@@ -4,9 +4,13 @@
 
 # Home folders other than the test containers' users (/home/$u in scripts is fine).
 # @TESTUSERS@ is filled in by the checker: every `mkuser NAME` in tests/ and every
-# `useradd … NAME` in tests/sandbox*/Dockerfile.
+# `useradd … NAME` in tests/sandbox*/Dockerfile and sandbox/Dockerfile (none yet: then every
+# home folder counts).
 /home/(?!(?:@TESTUSERS@)(?:/|\b)|\$|\{)[A-Za-z0-9_][A-Za-z0-9._-]*
 /Users/(?!Shared\b)[A-Za-z0-9_][A-Za-z0-9._-]*
+[A-Za-z]:\\Users\\[A-Za-z0-9_]
+# root's home (a bare /root is fine: "/root/" followed by a name is not).
+(?<![A-Za-z0-9_.-])/root/[A-Za-z0-9_.]
 # The same in the folder names Claude Code makes from a path under ~/.claude/projects/ (each
 # slash turned into a dash).
 (?<![A-Za-z0-9-])-home-(?!(?:@TESTUSERS@)-)[A-Za-z0-9_]
@@ -26,6 +30,8 @@ Claude-Session[:]
 \.ts\.net\b
 \b100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}\b
 \btskey-[A-Za-z0-9-]{10,}
+# Tailscale IPv6 (its ULA /48 prefix).
+\bfd7a:115c:a1e0[:]
 
 # Credentials.
 \b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}
@@ -35,4 +41,9 @@ Claude-Session[:]
 -----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----
 discord(?:app)?\.com/api/webhooks/
 hooks\.slack\.com/services/
+# A JWT (three base64url parts, the first two JSON objects), a bearer token of real length, an
+# SSH public key.
+\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.
+\b[Bb]earer [A-Za-z0-9._~+/=-]{24,}
+\bssh-(?:ed25519|rsa|dss|ecdsa-sha2-nistp[0-9]+) AAAA[A-Za-z0-9+/]{20,}
 \bxox[abpr]-[A-Za-z0-9-]{10,}

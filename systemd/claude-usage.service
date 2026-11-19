@@ -1,0 +1,32 @@
+# One fetch of the Claude usage limits, started by claude-usage.timer at every :00 and :30.
+# `claude-usage fetch` decides itself whether a call is due, records failures in its state, and
+# exits 0 for them, so the unit fails only when a fetch refused to run (its one <4> line is in
+# the journal). Installed by `claude-usage install`.
+[Unit]
+Description=Fetch the Claude usage limits (claude-usage)
+Documentation=https://github.com/AnapatAut/Claude-Usage
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/claude-usage fetch
+# The fetch ends itself after 25 s; this is the guard behind it.
+TimeoutStartSec=30s
+# Warnings and worse only: a refusal's <4> line stays, routine lines do not fill the journal.
+LogLevelMax=notice
+# Hardening a user manager can apply (seccomp, process flags, cgroup limits; no namespaces;
+# sandbox/run.sh checks what the processes really get). curl runs under the same restrictions.
+UMask=0077
+# A runaway curl stays small (a fetch and curl need a few tasks and a few MiB).
+TasksMax=32
+MemoryMax=128M
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM

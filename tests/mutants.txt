@@ -1,0 +1,429 @@
+# The safeguards tests/mutate.sh breaks, one at a time, and the check each must fail.
+# Format: see tests/mutate.sh.
+
+# ---------------------------------------------------------------- curl and the token
+
+name: q-flag-swapped
+file: src/curl.rs
+from:     "-q",
+to:       "-v",
+suite: cli fetch_success
+fails: curl argv: exactly the fixed list
+
+name: token-on-argv
+file: src/curl.rs
+from:     cmd.args(ARGS)
+from:         .arg(URL)
+to:       cmd.args(ARGS)
+to:           .arg(String::from_utf8_lossy(header.as_bytes()).into_owned())
+to:           .arg(URL)
+suite: cli fetch_success
+fails: curl argv: exactly the fixed list
+
+name: env-not-cleared
+file: src/curl.rs
+from:         .env_clear()
+from:         .env("LANG", "C")
+to:         .env("LANG", "C")
+suite: cli fetch_success
+fails: curl env: exactly LANG=C and PATH=/usr/bin:/bin
+
+name: curl-from-path
+file: src/curl.rs
+from:         None => SYSTEM.iter().find_map(|p| trusted(Path::new(p), false)),
+to:         None => std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join("curl")).find(|c| c.is_file()),
+suite: cli curl_choice
+fails: curl is never taken from PATH
+
+name: stdin-never-closed
+file: src/curl.rs
+from:                 stdin = None; // closed: curl reads -H @- to EOF
+to:                 // never closed
+suite: cli fetch_success
+fails: fetch exits 0, one call
+
+name: no-body-cap
+file: src/curl.rs
+from:                     if out.len() + n > MAX_OUT {
+to:                     if out.len() + n > usize::MAX / 2 {
+suite: cli http_errors
+fails: valid JSON over 64 KiB: bad_response
+
+name: no-watchdog
+file: src/curl.rs
+from: const WATCHDOG: Duration = Duration::from_secs(10);
+to: const WATCHDOG: Duration = Duration::from_secs(60);
+suite: cli http_errors
+fails: a hung curl: the watchdog ends it, network
+
+name: debug-not-redacted
+file: src/secret.rs
+from:         f.write_str("Secret([redacted])")
+to:         f.write_str(&String::from_utf8_lossy(&self.0))
+suite: unit
+fails: secret::tests::debug_is_redacted
+
+name: token-charset-unchecked
+file: src/creds.rs
+from:     if !(1..=MAX_TOKEN).contains(&t.len()) || !t.iter().all(|&b| token_byte(b)) {
+to:     if !(1..=MAX_TOKEN).contains(&t.len()) {
+suite: cli credentials
+fails: token with CR/LF: exit 0, no call, bad_credentials
+
+# ---------------------------------------------------------------- the schedule and the state
+
+name: write-after-not-ahead
+file: src/fetch.rs
+from:     if !write(&dir, &st, &note) {
+from:         return note.refuse(Cause::Write, None);
+from:     }
+from:     let ended = curl::call(&curl, &good.header);
+to:     let ended = curl::call(&curl, &good.header);
+suite: cli robustness
+fails: SIGKILL mid-call: the attempt was recorded first
+
+name: one-stamp-for-both
+file: src/get.rs
+from:     let visible = has_numbers && current == s.numbers_stamp.as_deref();
+to:     let visible = has_numbers && current == s.attempt_stamp.as_deref();
+suite: cli accounts
+fails: switch then SIGKILL mid-call: old numbers never shown
+
+name: account-changed-unmasked
+file: src/get.rs
+from:     if has_numbers && !visible {
+to:     if false {
+suite: unit
+fails: get::tests::numbers_shown_only_under_their_stamp
+
+name: fingerprint-always-new
+file: src/fetch.rs
+from:         Some(fp) => st.attempt_fingerprint.as_ref() != Some(fp),
+to:         Some(_) => true,
+suite: cli accounts
+fails: MCP-only change: no call, numbers back
+
+name: fingerprint-never-new
+file: src/fetch.rs
+from:         Some(fp) => st.attempt_fingerprint.as_ref() != Some(fp),
+to:         Some(_) => false,
+suite: cli accounts
+fails: switch: one call with the new token, its numbers
+
+name: no-floor
+file: src/schedule.rs
+from: pub const FLOOR: i64 = 5;
+to: pub const FLOOR: i64 = 0;
+suite: cli accounts
+fails: credentials churn: the floor holds
+
+name: now-limits-dropped
+file: src/schedule.rs
+from:     !recent.iter().any(|&t| window(t) == window(now)) && recent.len() < NOW_MAX
+to:     true
+suite: cli now
+fails: --now: one per :00/:30 window (exit 3)
+
+name: no-401-hold
+file: src/schedule.rs
+from:             s.next_attempt = Some(la.saturating_add(MAX_WAIT));
+from:         }
+from:         Outcome::ServerError | Outcome::Network => {
+to:             s.next_attempt = None;
+to:         }
+to:         Outcome::ServerError | Outcome::Network => {
+suite: cli auth_errors
+fails: 401: held for an hour
+
+name: no-lock
+file: src/lock.rs
+from:         match sys::flock(f.as_fd(), libc::LOCK_EX | libc::LOCK_NB) {
+to:         match Ok::<(), std::io::Error>(()) {
+suite: cli robustness
+fails: 10 concurrent fetches at one boundary: one call, all exit 0
+
+name: state-folder-followed
+file: src/state.rs
+from:         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+to:         libc::O_RDONLY | libc::O_DIRECTORY,
+suite: cli state_folder
+fails: a symlinked state folder: refused, exit 1, nothing written there
+
+# Two layers: the mode at open and harden()'s umask 077; either alone keeps usage.json 600.
+name: state-file-mode
+file: src/state.rs
+from:             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
+from:             0o600,
+from:         ) {
+from:             Ok(fd) => {
+from:                 made = Some((name, fd));
+to:             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
+to:             0o644,
+to:         ) {
+to:             Ok(fd) => {
+to:                 made = Some((name, fd));
+file: src/sys.rs
+from:         libc::umask(0o077);
+to:         libc::umask(0o022);
+suite: cli fetch_success
+fails: modes: state folders 700, usage.json and .lock 600
+
+name: xdg-state-home-used
+file: src/state.rs
+from:     let base = home.join(".local/state");
+to:     let base = std::env::var_os("XDG_STATE_HOME").map_or_else(|| home.join(".local/state"), std::path::PathBuf::from);
+suite: cli config
+fails: XDG_STATE_HOME is ignored
+
+name: deadline-not-reset
+file: src/sys.rs
+from:         libc::signal(libc::SIGALRM, libc::SIG_DFL);
+to:         // left as the parent set it
+suite: cli robustness
+fails: the 25 s deadline
+
+name: detach-no-setsid
+file: src/detach.rs
+from:             sys::setsid();
+to:             // no new session
+suite: cli refresh
+fails: the detached fetch runs in its own session
+
+name: detach-fds-inherited
+file: src/detach.rs
+from:             sys::cloexec_from(3);
+to:             // fds inherited
+suite: cli refresh
+fails: the reader's pipes (stdout, stderr, fd 3) reach EOF at once
+
+# ---------------------------------------------------------------- install and uninstall
+
+name: install-takes-any-file
+file: src/install.rs
+from:             Current::Hash(h) if *h == new[p.index()] || old.is_some_and(|m| m.owns(p, h)) => {}
+to:             Current::Hash(h) if true || *h == new[p.index()] || old.is_some_and(|m| m.owns(p, h)) => {}
+suite: cli install
+fails: install: another program at its path, refused
+
+name: owns-ignores-was
+file: src/install.rs
+from:             .is_some_and(|r| r.sha == sha || r.was.as_deref() == Some(sha))
+to:             .is_some_and(|r| r.sha == sha)
+suite: cli install
+fails: an install stopped part-way
+
+name: manifest-not-first
+file: src/install.rs
+from:     if write_atomic(&share, MANIFEST, man.render().as_bytes(), 0o600).is_err() {
+from:         return back_out("the manifest cannot be written");
+from:     }
+from:
+from:     for p in Part::ALL {
+to:
+to:     for p in Part::ALL {
+suite: cli install
+fails: then the earlier release installs over it
+
+# Two layers: the first look makes nothing, and a refusal removes what the run made.
+name: refused-install-makes-folders
+file: src/install.rs
+from:         if let Err(m) = examine(&home, old.as_ref(), b.as_ref(), u.as_ref(), &new) {
+to:         if false && let Err(m) = examine(&home, old.as_ref(), b.as_ref(), u.as_ref(), &new) {
+file: src/install.rs
+from:         let _ = std::fs::remove_dir(d);
+to:         let _ = d;
+suite: cli install
+fails: a refused install leaves no folder behind
+
+name: folder-others-may-write
+file: src/install.rs
+from:     let others_write = st.perm() & 0o002 != 0;
+to:     let others_write = false;
+suite: cli install
+fails: install: a ~/.local/bin others can write, refused
+
+# Two layers: the first look and the run itself each take the lock.
+name: install-no-lock
+file: src/install.rs
+from:     if sys::flock(share.as_fd(), libc::LOCK_EX | libc::LOCK_NB).is_err() {
+from:         return Err("another install or uninstall is running".into());
+from:     }
+to:
+file: src/install.rs
+from:     if sys::flock(share.as_fd(), libc::LOCK_EX | libc::LOCK_NB).is_err() {
+from:         return refuse(CMD, "another install or uninstall is running");
+from:     }
+to:
+suite: cli install
+fails: while another run holds the lock
+
+name: uninstall-no-lock
+file: src/install.rs
+from:     if let Some(s) = &share
+from:         && sys::flock(s.as_fd(), libc::LOCK_EX | libc::LOCK_NB).is_err()
+to:     if let Some(s) = &share
+to:         && false
+to:         && sys::flock(s.as_fd(), libc::LOCK_EX | libc::LOCK_NB).is_err()
+suite: cli install
+fails: while another run holds the lock
+
+name: uninstall-ignores-stuck
+file: src/install.rs
+from:     if !stuck.is_empty() {
+to:     if false {
+suite: cli install
+fails: uninstall that cannot remove the program
+
+name: refused-install-keeps-made-folders
+file: src/install.rs
+from:         let _ = std::fs::remove_dir(d);
+to:         let _ = d;
+suite: cli install
+fails: a refused install part-way through making folders
+
+name: timer-failure-exits-0
+file: src/install.rs
+from:     if !timer_as_asked {
+to:     if false {
+suite: cli install
+fails: install: the timer cannot be enabled
+
+name: any-link-is-the-timer
+file: src/install.rs
+from:             if a.dev == b.dev
+from:                 && a.ino == b.ino
+from:                 && target.file_name() == Some(OsStr::new(TIMER_UNIT)) =>
+to:             if target.file_name() == Some(OsStr::new(TIMER_UNIT)) =>
+suite: cli install
+fails: install: a link to a claude-usage.timer in another folder at the timer's link, refused
+
+name: kept-file-mode-left
+file: src/install.rs
+from:             if !fix_mode(dirs.of(p), p.file(), p.mode()) {
+to:             if false {
+suite: cli install
+fails: install: the same program already there
+
+name: sweep-any-temp
+file: src/install.rs
+from:             b.len() == p.len() + 6 && b.starts_with(p.as_bytes())
+to:             b.first() == Some(&b'.')
+suite: cli install
+fails: install removes temp files a killed run left
+
+name: uninstall-removes-changed
+file: src/install.rs
+from:             Current::Hash(h) if man.owns(p, &h) => {
+to:             Current::Hash(h) if true || man.owns(p, &h) => {
+suite: cli install
+fails: uninstall keeps a changed unit and your drop-in
+
+name: uninstall-no-wait
+file: src/install.rs
+from: const LOCK_WAIT: Duration = Duration::from_secs(15);
+to: const LOCK_WAIT: Duration = Duration::from_secs(0);
+suite: cli install
+fails: uninstall waits for a fetch holding a state lock
+
+name: purge-unchecked
+file: src/install.rs
+from:     if purge
+from:         && let Some(r) = &state_root
+to:     if false
+to:         && let Some(r) = &state_root
+suite: cli install
+fails: uninstall --purge with a file of another kind in the state folder
+
+name: manifest-lax
+file: src/install.rs
+from:                 _ => return None,
+to:                 _ => {}
+suite: unit
+fails: install::tests::manifest_is_strict
+
+name: install-sh-unchecked
+file: install.sh
+from: sha256sum --quiet --strict -c SHA256SUMS || die "the files do not match SHA256SUMS: download the release again"
+to: true
+suite: cli install
+fails: install.sh with a file that does not match SHA256SUMS
+
+# ---------------------------------------------------------------- what needs root or systemd
+
+name: credentials-owner-unchecked
+file: src/creds.rs
+from:     if st.uid != sys::euid() {
+to:     if false {
+suite: sandbox
+fails: credentials owned by another user
+
+name: state-folder-owner-unchecked
+file: src/state.rs
+from:     if !st.is_dir() || st.uid != sys::euid() {
+to:     if !st.is_dir() {
+suite: sandbox
+fails: a state folder owned by another user
+
+name: usage-file-owner-unchecked
+file: src/state.rs
+from:     if !st.is_file() || st.uid != sys::euid() {
+from:         return Err(Problem::Unusable);
+from:     }
+from:     let mut buf
+to:     if !st.is_file() {
+to:         return Err(Problem::Unusable);
+to:     }
+to:     let mut buf
+suite: sandbox
+fails: a usage.json owned by another user
+
+name: install-as-root
+file: src/install.rs
+from:     if euid == 0 {
+to:     if false {
+suite: sandbox
+fails: claude-usage install as root in root's own home
+
+name: redirect-followed
+file: src/curl.rs
+from:     "--max-redirs",
+from:     "0",
+to:     "-L",
+to:     "-q",
+suite: sandbox
+fails: a redirect is not followed
+
+name: unit-namespaces-allowed
+file: systemd/claude-usage.service
+from: RestrictNamespaces=yes
+to: RestrictNamespaces=no
+suite: sandbox
+fails: the hardening as applied
+
+name: unit-logs-everything
+file: systemd/claude-usage.service
+from: LogLevelMax=notice
+to: LogLevelMax=debug
+suite: sandbox
+fails: routine runs leave no journal line
+
+name: group-members-ignored
+file: src/install.rs
+from:         (Some((group, members)), Some((user, _))) => !members && group == user,
+to:         (Some((group, _)), Some((user, _))) => group == user,
+suite: sandbox
+fails: the same, another user listed in that group: refused
+
+name: acl-ignored
+file: src/install.rs
+from:         && (st.gid != sys::egid() || !private_group(st.gid) || sys::has_access_acl(fd.as_fd()));
+to:         && (st.gid != sys::egid() || !private_group(st.gid));
+suite: sandbox
+fails: the same, an ACL letting another user write: refused
+
+name: home-not-passwd-allowed
+file: src/install.rs
+from:         && paths::canonical(&home) != paths::canonical(&phome)
+to:         && false
+suite: sandbox
+fails: install with a HOME that is not the passwd home

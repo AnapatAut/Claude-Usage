@@ -32,8 +32,9 @@ trap 'rm -rf "$tmp"' EXIT
 # All generic rules as one regex: grep -P takes a single pattern. The test containers' users
 # (their names are made up; every tests/sandbox*/Dockerfile) may appear in home paths.
 users=$( { grep -ohE '\bmkuser [a-z0-9]+' tests/*.sh 2>/dev/null | cut -d' ' -f2
-	grep -oE 'useradd [^&;|]* [a-z0-9]+( |$)' tests/sandbox*/Dockerfile 2>/dev/null | awk '{ print $NF }'; } | sort -u | paste -sd'|')
-[ -n "$users" ] || users=fresh
+	grep -ohE 'useradd [^&;|]* [a-z0-9]+( |$)' tests/sandbox*/Dockerfile sandbox/Dockerfile 2>/dev/null | awk '{ print $NF }'; } | sort -u | paste -sd'|')
+# No test users yet: a pattern that matches nothing, so every home folder is refused.
+[ -n "$users" ] || users='(?!)'
 grep -v -e '^#' -e '^[[:space:]]*$' "$RULES" | sed "s/@TESTUSERS@/$users/; s/.*/(?:&)/" | paste -sd'|' > "$tmp/rule" || exit 2
 [ -s "$tmp/rule" ] || { echo "privacy: no rules in $RULES" >&2; exit 2; }
 : > "$tmp/local"
