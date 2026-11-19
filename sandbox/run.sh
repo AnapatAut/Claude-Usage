@@ -340,7 +340,8 @@ chk "the service run ended well (Result=success, exit 0)" \
 	'ux systemctl --user status claude-usage.service --no-pager'
 getj
 chk "the timer's fetch recorded new numbers (get: no error, fetched_at at that boundary)" \
-	'jqg ".error == null and .fetched_at >= $(($(date +%s) - 45)) and .windows.five_hour.pct == 30.4"' 'echo "$G"'
+	'jqg ".error == null and .fetched_at >= $(($(date +%s) - 45)) and .windows.five_hour.pct == 30.4"' \
+	'echo "$G"; date +%s; state .; x tail -n 3 /var/log/stub.log'
 chk "the unit as read back: TimeoutStartSec 30 s, LogLevelMax notice (5), UMask 0077" \
 	'[ "$(uprop claude-usage.service TimeoutStartUSec)" = 30s ] && [ "$(uprop claude-usage.service LogLevelMax)" = 5 ] && [ "$(uprop claude-usage.service UMask)" = 0077 ]' \
 	'ux systemctl --user show claude-usage.service -p TimeoutStartUSec,LogLevelMax,UMask'
