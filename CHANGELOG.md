@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.1.0] - 2026-11-19
+
 ### Added
 - `get [--refresh]`, `fetch [--now]` and `status`. `get` prints the cached numbers as the
   contract's JSON (schema 0) and always exits 0; numbers fetched under other credentials are

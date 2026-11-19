@@ -7,8 +7,8 @@ themselves: more calls (and HTTP 429 sooner), different numbers in each tool, an
 the OAuth token handling per tool. `claude-usage` is the only program that calls the endpoint.
 Every tool asks it, and every tool works without it.
 
-**Status: under construction, no release yet.** Every command works; the interface below is a
-draft (`schema: 0`) and may still change.
+**Status: pre-release (0.x).** Every command works; the interface below is a draft
+(`schema: 0`) and may still change.
 
 ## Interface (draft)
 
