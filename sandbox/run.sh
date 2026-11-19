@@ -46,8 +46,10 @@ OPTS=(--hostname cu-sandbox --network none
 INIT=(sh -c 'mount -o remount,rw /sys/fs/cgroup 2>/dev/null; exec /sbin/init')
 # The HostConfig docker 29.5 gives a container made with OPTS, every field written out here and
 # never taken from a container (a wrong one would match itself). Any other value, a field
-# missing or one more, fails the check. MaskedPaths is held apart: docker adds a path per CPU
-# of the host, so every path below is required and more of that kind only are allowed.
+# missing or one more, fails the check. Dns only: null (docker 29.5) is read as [] (the docker
+# of GitHub's runners); both mean no DNS server set. MaskedPaths is held apart: docker adds a
+# path per CPU of the host, so every path below is required and more of that kind only are
+# allowed.
 WANT='{
   "AutoRemove": false, "Binds": null,
   "BlkioDeviceReadBps": [], "BlkioDeviceReadIOps": [], "BlkioDeviceWriteBps": [], "BlkioDeviceWriteIOps": [],
@@ -57,7 +59,7 @@ WANT='{
   "CpuCount": 0, "CpuPercent": 0, "CpuPeriod": 0, "CpuQuota": 0, "CpuRealtimePeriod": 0, "CpuRealtimeRuntime": 0,
   "CpuShares": 0, "CpusetCpus": "", "CpusetMems": "",
   "DeviceCgroupRules": null, "DeviceRequests": null, "Devices": [],
-  "Dns": null, "DnsOptions": [], "DnsSearch": [], "ExtraHosts": ["api.anthropic.com:127.0.0.1"], "GroupAdd": null,
+  "Dns": [], "DnsOptions": [], "DnsSearch": [], "ExtraHosts": ["api.anthropic.com:127.0.0.1"], "GroupAdd": null,
   "IOMaximumBandwidth": 0, "IOMaximumIOps": 0, "IpcMode": "private", "Isolation": "", "Links": null,
   "LogConfig": {"Config": {"max-size": "10m"}, "Type": "json-file"},
   "Memory": 1073741824, "MemoryReservation": 0, "MemorySwap": 1073741824, "MemorySwappiness": null,
@@ -99,7 +101,8 @@ hostconfig_diff() {
 		{ echo "docker inspect: $got"; return 1; }
 	out=$(jq -rn --argjson want "$WANT" --argjson masked "$MASKED" --argjson hm "$got" '
 		def show($o; $k): if $o | has($k) then $o[$k] | tojson else "(none)" end;
-		$hm[0] as $got | $hm[1] as $mounts | $hm[2] as $nets | $got.MaskedPaths as $m
+		($hm[0] | if type == "object" and has("Dns") and .Dns == null then .Dns = [] else . end) as $got
+		| $hm[1] as $mounts | $hm[2] as $nets | $got.MaskedPaths as $m
 		| (([$got, $want] | map(keys) | add | unique - ["MaskedPaths"])[] as $k
 		   | select(($got | has($k)) != ($want | has($k)) or $got[$k] != $want[$k])
 		   | "\($k): \(show($got; $k)), expected \(show($want; $k))"),
