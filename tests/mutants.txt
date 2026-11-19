@@ -35,6 +35,20 @@ to:         None => std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.
 suite: cli curl_choice
 fails: curl is never taken from PATH
 
+name: config-any-home
+file: src/config.rs
+from:     if !honoured(home) {
+to:     if false {
+suite: cli curl_choice
+fails: curl = with a HOME that is not the passwd home
+
+name: config-no-passwd-entry
+file: src/config.rs
+from:     sys::passwd_home(sys::euid()).is_some_and(|p| paths::canonical(home) == paths::canonical(&p))
+to:     sys::passwd_home(sys::euid()).is_none_or(|p| paths::canonical(home) == paths::canonical(&p))
+suite: cli curl_choice
+fails: curl = with no passwd entry
+
 name: stdin-never-closed
 file: src/curl.rs
 from:                 stdin = None; // closed: curl reads -H @- to EOF

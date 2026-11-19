@@ -7,7 +7,8 @@
 #
 # It always runs inside a container: ubuntu:24.04 pinned by digest, plus jq and procps (image
 # cu-test:1, made once with network by `docker commit`, labelled). No network, no real curl, no
-# real home: only tests/ and the binary are mounted, read-only. A bug in claude-usage that
+# real home: only tests/ and the binary are mounted, read-only (and /etc/passwd, a new file of
+# the user's for each run, which the cases rewrite). A bug in claude-usage that
 # ignored HOME or CLAUDE_CONFIG_DIR could therefore never reach a real token or the real
 # endpoint. The work folder is a tmpfs of the user's, mode 700 (claude-usage refuses a curl in a
 # folder others can write). The fake curl refuses every token that is not SECRET-TOKEN-XXX, and
@@ -59,7 +60,13 @@ if [ "${CU_IN_CONTAINER:-}" != 1 ]; then
 	fi
 	flock -u 9
 	exec 9>&-
-	exec docker run --rm --init --pull never --network none --user "$(id -u):$(id -g)" \
+	# /etc/passwd: a file of the user's, so that each case can give its uid a passwd entry, or
+	# none (the config file is read only when HOME is the passwd home).
+	PW=$(mktemp "${TMPDIR:-/tmp}/cu-test-passwd.XXXXXX") || die "mktemp"
+	trap 'rm -f "$PW"' EXIT
+	printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n' > "$PW"
+	chmod 644 "$PW"
+	docker run --rm --init --pull never --network none --user "$(id -u):$(id -g)" \
 		--memory 1g --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges --read-only \
 		--tmpfs /tmp:size=64m \
 		--tmpfs "/work:size=512m,exec,mode=0700,uid=$(id -u),gid=$(id -g)" \
@@ -68,8 +75,10 @@ if [ "${CU_IN_CONTAINER:-}" != 1 ]; then
 		--mount "type=bind,src=$REPO/systemd,dst=/src/systemd,readonly" \
 		--mount "type=bind,src=$REPO/install.sh,dst=/src/install.sh,readonly" \
 		--mount "type=bind,src=$BIN,dst=/opt/cu/claude-usage,readonly" \
+		--mount "type=bind,src=$PW,dst=/etc/passwd" \
 		-e CU_IN_CONTAINER=1 -e CU_ONLY="${CU_ONLY:-}" \
 		"$IMG" bash /src/tests/cli.sh
+	exit
 fi
 
 # ---------------------------------------------------------------- inside: the harness
@@ -83,6 +92,12 @@ done
 [ "$(stat -c '%a %u' /work)" = "700 $(id -u)" ] || die "/work is not the user's own 700 folder"
 [ "$(stat -c '%a %u' /small)" = "700 $(id -u)" ] || die "/small is not the user's own 700 folder"
 [ "$(stat -c %u /tmp)" = 0 ] || die "/tmp is not root's (the HOME-owner case needs that)"
+[ -w /etc/passwd ] || die "/etc/passwd is not the harness's own file"
+! grep -q "^[^:]*:[^:]*:$(id -u):" /etc/passwd || die "the uid already has a passwd entry"
+PW_BASE=$(cat /etc/passwd)
+# The uid's passwd entry, home DIR (written in place: /etc/passwd is a bind mount), or none.
+passwd_set() { printf '%s\ncu:x:%s:%s::%s:/bin/sh\n' "$PW_BASE" "$(id -u)" "$(id -g)" "$1" > /etc/passwd; }
+passwd_none() { printf '%s\n' "$PW_BASE" > /etc/passwd; }
 # The core-dump check means something only where the limit is not already 0.
 ulimit -S -c "$(ulimit -H -c)"
 [ "$(ulimit -c)" != 0 ] || die "the core size limit is 0 here: the core-dump check would prove nothing"
@@ -292,8 +307,9 @@ reset() {
 	idle
 	sweep
 	rm -rf "${T:?}/home" "$T/creds" "$F" "$T/decoy-ran" "$T/xdg" "$T/xdgc" "$T/gw" "$T/elsewhere" \
-		"$T"/out* "$T"/err* "$T/rcs" "$T/gets" "$T/cu2" /tmp/.config /tmp/.local /small/*
+		"$T"/out* "$T"/err* "$T/rcs" "$T/gets" "$T/cu2" "$T/home-link" /tmp/.config /tmp/.local /small/*
 	EDIT_FAIL=''
+	passwd_set "$T/home"
 	export CLAUDE_CONFIG_DIR=$T/creds/cfg
 	unset XDG_STATE_HOME XDG_CONFIG_HOME SSLKEYLOGFILE https_proxy HTTPS_PROXY CURL_CA_BUNDLE
 	mkdir -p "$HOME/.config/claude-usage" "$F"
@@ -1043,6 +1059,7 @@ case_state_folder() {
 	early 6
 	home=$HOME
 	export HOME=/small/home
+	passwd_set "$HOME"
 	mkdir -p "$HOME/.config/claude-usage" && chmod 700 "$HOME" "$HOME/.config" "$HOME/.config/claude-usage"
 	printf 'curl = %s/bin/curl\n' "$T" > "$HOME/.config/claude-usage/config"
 	chmod 600 "$HOME/.config/claude-usage/config"
@@ -1056,6 +1073,7 @@ case_state_folder() {
 	ok "a full state folder: get --refresh spawns nothing more in that window" '[ "$m" = 0 ]'
 	rm -rf /small/fill /small/home
 	export HOME=$home
+	passwd_set "$HOME"
 
 	# The binary removed while it runs (an uninstall): run a deleted copy through an open fd.
 	reset
@@ -1219,6 +1237,28 @@ case_curl_choice() {
 	(cd "$T" && exec "$CU" fetch 2>> "$STDERR")
 	getj
 	ok "a relative configured curl: refused, no_curl" '[ "$(runs)" = 0 ] && jqg ".error == \"no_curl\""'
+
+	# curl = is read only when HOME is the passwd home: a tool that points HOME at a folder of
+	# a repository must not choose the curl that gets the token.
+	reset
+	mkdir -p "$T/elsewhere" && passwd_set "$T/elsewhere"
+	cu fetch
+	getj
+	"$CU" status > "$T/out.status" 2>> "$STDERR"
+	ok "curl = with a HOME that is not the passwd home: ignored, no_curl, no call" \
+		'[ "$(runs)" = 0 ] && jqg ".error == \"no_curl\""'
+	ok "status names the ignored config file" 'grep -qx "config file: *ignored (HOME is not your home in the passwd file)" "$T/out.status"'
+	reset
+	passwd_none
+	cu fetch
+	getj
+	ok "curl = with no passwd entry: ignored, no_curl, no call" '[ "$(runs)" = 0 ] && jqg ".error == \"no_curl\""'
+	reset
+	ln -s home "$T/home-link" && passwd_set "$T/home-link"
+	cu fetch
+	"$CU" status > "$T/out.status" 2>> "$STDERR"
+	ok "curl = with the passwd home spelled through a symlink: read (one call)" \
+		'called 1 && ! grep -q "^config file:" "$T/out.status"'
 }
 
 case_refresh() {
@@ -1431,8 +1471,10 @@ case_robustness() {
 	wait
 	ok "10 concurrent fetches at one boundary: one call, all exit 0" 'called 1 && [ "$(grep -cx 0 "$T/rcs")" = 10 ]'
 
+	passwd_none
 	"$CU" status > "$T/out.status" 2>> "$STDERR"
 	rc=$?
+	passwd_set "$HOME"
 	ok "status runs (exit 0, some output)" '[ "$rc" = 0 ] && [ -s "$T/out.status" ]'
 	ok "status warns: this uid has no passwd entry (the timer's home may differ)" 'grep -q "^warning: .*no passwd entry" "$T/out.status"'
 

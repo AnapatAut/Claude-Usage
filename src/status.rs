@@ -216,6 +216,12 @@ fn report(o: &mut String, now: i64) {
                 .display()
                 .to_string())
     );
+    if !config::honoured(&home) && home.join(".config/claude-usage/config").exists() {
+        let _ = writeln!(
+            o,
+            "config file:    ignored (HOME is not your home in the passwd file)"
+        );
+    }
     let wants = home.join(".config/systemd/user/timers.target.wants/claude-usage.timer");
     let _ = writeln!(
         o,
