@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.1.1] - 2026-11-19
+
 ### Security
 - The config file (`curl =`) is read only when `$HOME` is the user's home in the passwd file
   (both canonical); with no passwd entry it is ignored. A tool that sets `HOME` to a folder of
