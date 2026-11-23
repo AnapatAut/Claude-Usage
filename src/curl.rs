@@ -240,8 +240,9 @@ fn wait(child: &mut Child, killed: bool, pid: libc::pid_t) -> Option<std::proces
     }
 }
 
-/// Splits curl's output at the last newline: the body, then `<3 digits> <retry-after>`. Any
-/// other tail (a curl older than 7.84 leaves `%header{…}` unexpanded) is `no_curl`.
+/// Splits curl's output at the last newline: the body, then `<3 digits> <retry-after>`. A curl
+/// older than 7.84 leaves `%header{…}` unexpanded: the call was made, so its status counts (a 429
+/// still backs off), with no Retry-After. Any other tail is `no_curl`.
 fn tail(mut out: Vec<u8>) -> Ended {
     let Some(nl) = out.iter().rposition(|&b| b == b'\n') else {
         return Ended::NoCurl;
@@ -255,9 +256,14 @@ fn tail(mut out: Vec<u8>) -> Ended {
         Some(cv) => cv,
         None => return Ended::NoCurl,
     };
-    if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_digit()) || value.contains("%header{") {
+    if code.len() != 3 || !code.bytes().all(|b| b.is_ascii_digit()) {
         return Ended::NoCurl;
     }
+    let value = if value.contains("%header{") {
+        ""
+    } else {
+        value
+    };
     let status = code.parse().unwrap_or(0);
     if status == 0 {
         return Ended::Network;
@@ -291,14 +297,16 @@ mod tests {
         );
         assert_eq!(tail(b"\n200 ".to_vec()), resp(200, b"", ""));
         assert_eq!(tail(b"{}\n000 ".to_vec()), Ended::Network);
-        for bad in [
-            &b"{}\n200 %header{retry-after}"[..],
-            b"{}",
-            b"{}\n200",
-            b"{}\n20 x",
-            b"{}\nabc ",
-            b"",
-        ] {
+        // curl before 7.84: the status counts, no Retry-After.
+        assert_eq!(
+            tail(b"{}\n200 %header{retry-after}".to_vec()),
+            resp(200, b"{}", "")
+        );
+        assert_eq!(
+            tail(b"{}\n429 %header{retry-after}".to_vec()),
+            resp(429, b"{}", "")
+        );
+        for bad in [&b"{}"[..], b"{}\n200", b"{}\n20 x", b"{}\nabc ", b""] {
             assert_eq!(
                 tail(bad.to_vec()),
                 Ended::NoCurl,

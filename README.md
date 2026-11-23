@@ -43,10 +43,30 @@ claude-usage uninstall [--purge]              remove it (--purge: its state too)
   `token_expired`, `account_changed`). Treat an unknown word as a generic error.
 - Numbers fetched with other credentials (another account, or before a logout) are never shown.
 
+## Before you use it
+
+- `claude-usage` is not made, endorsed or supported by Anthropic. It calls
+  `api.anthropic.com/api/oauth/usage`, an endpoint Anthropic does not document for other
+  programs, with your own Claude Code OAuth token. The endpoint can change, rate-limit (HTTP
+  429) or refuse such calls at any time; `get` then keeps the last numbers and names the error.
+- Anthropic's terms limit what programs other than its own may do with Claude credentials.
+  `claude-usage` reads your token only on your machine, at fetch time, never stores, copies or
+  forwards it, never refreshes it, and makes no model requests: only this read-only call. Read
+  the terms yourself and decide; this is not legal advice.
+- With the timer, it makes one call every 30 s while your token is valid, also when nobody looks
+  at the numbers (it stops when the token expires, a few hours after you last used Claude Code).
+  Install with `--no-timer` to fetch only while a tool asks (`get --refresh`).
+- Run only one fetcher per account: two programs calling this endpoint get 429s.
+
 ## Requirements
 
 - Linux on x86_64. macOS and Windows are not supported.
-- curl 7.84 or newer in `/usr/bin`, `/bin` or `/usr/local/bin`.
+- curl in `/usr/bin`, `/bin` or `/usr/local/bin`, in root-owned folders (or named in the config
+  file, see Security). 7.84 or newer also reads the endpoint's `Retry-After`; an older curl
+  works, and backs off on a 429 by its own steps. NixOS and Guix keep curl in a store no rule
+  here accepts: not supported yet.
+- A direct connection to `api.anthropic.com`: curl runs with an empty environment, so proxy
+  variables are not passed (a network that only allows a proxy shows `network`).
 - Logged in to Claude Code with a Claude account (it reads Claude Code's `.credentials.json`;
   API-key setups have no usage limits to show).
 - systemd user services for the timer (optional: tools that call `get --refresh` start fetches
@@ -99,7 +119,8 @@ the timer is not as asked).
 
 - The OAuth token is read from Claude Code's credentials file at fetch time and given to curl
   on its standard input: never on a command line, in the environment, a file or a log. The
-  buffers that held it are zeroed before they are freed.
+  buffers claude-usage holds it in are zeroed before they are freed (a token written with JSON
+  escapes, which real tokens are not, passes through a parser buffer that is not).
 - `claude-usage` never writes, refreshes or copies Claude Code's credentials. `get` only
   `stat`s the file.
 - curl is never looked up on `PATH`: `/usr/bin/curl`, `/bin/curl` or `/usr/local/bin/curl` in

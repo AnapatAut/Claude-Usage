@@ -49,6 +49,59 @@ to:     sys::passwd_home(sys::euid()).is_none_or(|p| paths::canonical(home) == p
 suite: cli curl_choice
 fails: curl = with no passwd entry
 
+name: oldcurl-ignored
+file: src/curl.rs
+from:     let value = if value.contains("%header{") {
+from:         ""
+from:     } else {
+from:         value
+from:     };
+to:     if value.contains("%header{") {
+to:         return Ended::NoCurl;
+to:     }
+suite: cli http_errors
+fails: curl older than 7.84 (tail unexpanded)
+
+name: no-call-no-hold
+file: src/schedule.rs
+from:             s.next_attempt = Some(la.saturating_add(NO_CALL_HOLD));
+to:             s.next_attempt = None;
+suite: cli accounts
+fails: logout: recorded once, then held 5 min
+
+name: folder-without-credentials
+file: src/fetch.rs
+from:         !matches!(paths::exe(), Exe::Deleted) && !matches!(creds::look(&cfg), Seen::Missing);
+to:         !matches!(paths::exe(), Exe::Deleted);
+file: src/get.rs
+from:     !matches!(seen, Seen::Missing)
+from:         && euid != 0
+to:     euid != 0
+suite: cli credentials
+fails: no credentials file: no state folder made
+
+name: now-blocked-by-no-call-hold
+file: src/schedule.rs
+from:         if wait_until(s, now).is_some_and(|na| now < na) && !no_call_hold(s) {
+to:         if wait_until(s, now).is_some_and(|na| now < na) {
+suite: cli config
+fails: no_curl, then fixed: fetch --now looks again at once
+
+name: lock-recorded-every-run
+file: src/fetch.rs
+from:     state::sweep_temps(&dir, now);
+to:     lock::record(&lockf, std::process::id(), now);
+to:     state::sweep_temps(&dir, now);
+suite: cli accounts
+fails: logout: recorded once, then held 5 min
+
+name: install-sh-not-strict
+file: install.sh
+from: awk 'NF != 2 || length($1) != 64 || $1 !~ /^[0-9a-f]+$/ { exit 1 }' SHA256SUMS ||
+to: true ||
+suite: cli install
+fails: install.sh: a malformed SHA256SUMS line is refused
+
 name: stdin-never-closed
 file: src/curl.rs
 from:                 stdin = None; // closed: curl reads -H @- to EOF
@@ -357,8 +410,8 @@ fails: install::tests::manifest_is_strict
 
 name: install-sh-unchecked
 file: install.sh
-from: sha256sum --quiet --strict -c SHA256SUMS || die "the files do not match SHA256SUMS: download the release again"
-to: true
+from: 	[ -n "$want" ] && [ "$got" = "$want" ] || die "the files do not match SHA256SUMS: download the release again"
+to: 	true
 suite: cli install
 fails: install.sh with a file that does not match SHA256SUMS
 

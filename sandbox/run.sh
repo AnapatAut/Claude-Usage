@@ -405,6 +405,70 @@ r=$(cu install --no-timer 2>&1); rc=$?
 chk "install --no-timer: through systemctl, the timer disabled and stopped" \
 	'[ "$rc" = 0 ] && [ "$(ux systemctl --user is-enabled claude-usage.timer 2>&1)" = disabled ] && [ "$(uprop claude-usage.timer ActiveState)" = inactive ]' 'echo "$r"'
 
+echo "== 4b. resources (the timer runs one fetch every 30 s, for hours)"
+# One run as sbuser under GNU time: "wall_ms cpu_ms rss_kb", or nothing when time failed (the
+# file is removed first, so an old one never counts). wait4's rusage counts the waited-for
+# children too, so a fetch's numbers include its curl. Bounds are generous (a loaded host); the
+# info lines give the numbers.
+measure() {
+	ux sh -c 'rm -f /tmp/cu-time; /usr/bin/time -f "%e %U %S %M" -o /tmp/cu-time "$@" > /dev/null 2>&1; tail -n 1 /tmp/cu-time' _ "$@" 2> /dev/null |
+		awk 'NF == 4 && $4 > 0 { printf "%d %d %d\n", $1 * 1000, ($2 + $3) * 1000, $4 }'
+}
+# The largest of each column over the lines on stdin, and how many lines there were.
+maxcols() { awk 'NF == 3 { n++; for (i = 1; i <= 3; i++) if ($i > m[i]) m[i] = $i } END { printf "%d %d %d %d\n", m[1], m[2], m[3], n }'; }
+# One run under strace -c, children included: "syncs renames writes ran". writes counts write,
+# pwrite64, ftruncate and truncate on any fd (stdout too); ran is 1 when strace left its summary
+# (removed first), so a strace that did not run never reads as "no syscalls".
+syscalls() {
+	ux sh -c 'rm -f /tmp/cu-strace
+		strace -f -qq -c -o /tmp/cu-strace -e trace=fsync,fdatasync,rename,renameat,renameat2,write,pwrite64,ftruncate,truncate "$@" > /dev/null 2>&1
+		[ -f /tmp/cu-strace ] && ran=1 || ran=0
+		awk -v ran=$ran "/sync\$/ { s += \$4 } /rename/ { r += \$4 } / (write|pwrite64|ftruncate|truncate)\$/ { w += \$4 } END { printf \"%d %d %d %d\\n\", s, r, w, ran }" /tmp/cu-strace 2> /dev/null ||
+			echo "0 0 0 $ran"' _ "$@"
+}
+due() { state_edit '.next_attempt = null | .last_attempt -= 40'; }
+mode ok
+sizes0=$(ux sh -c 'find ~/.local/state/claude-usage | wc -l')
+dues='' idles=''
+n0=$(calls)
+for _ in 1 2 3 4 5; do
+	window 3 18
+	due
+	dues+=$(measure "$CU" fetch)$'\n'
+	idles+=$(measure "$CU" fetch)$'\n'
+done
+n1=$(calls)
+read -r dw dc dr dn <<< "$(maxcols <<< "$dues")"
+read -r iw ic ir icount <<< "$(maxcols <<< "$idles")"
+info "a due fetch (real curl, TLS to the stand-in), worst of 5: ${dw} ms, CPU ${dc} ms, peak ${dr} KiB"
+info "a run with nothing due, worst of 5: ${iw} ms, CPU ${ic} ms, peak ${ir} KiB"
+chk "the measured runs: 5 calls, one per due run, none when nothing was due" '[ $((n1 - n0)) = 5 ]'
+chk "every run measured (5 due, 5 with nothing due, each with a peak above 0)" '[ "$dn" = 5 ] && [ "$icount" = 5 ]' \
+	'echo "due: $dues"; echo "idle: $idles"'
+chk "a due fetch is small: under 3 s, CPU under 300 ms, peak under 32 MiB (curl included)" \
+	'[ "$dn" = 5 ] && [ "$dw" -lt 3000 ] && [ "$dc" -lt 300 ] && [ "$dr" -lt 32768 ]' 'echo "$dues"'
+chk "a run with nothing due is tiny: CPU under 30 ms, peak under 8 MiB" \
+	'[ "$icount" = 5 ] && [ "$ic" -lt 30 ] && [ "$ir" -lt 8192 ]' 'echo "$idles"'
+g=$(for _ in 1 2 3; do measure "$CU" get; done | maxcols)
+read -r gw gc gr gn <<< "$g"
+info "get, worst of 3: ${gw} ms, CPU ${gc} ms, peak ${gr} KiB"
+chk "get is tiny: CPU under 30 ms, peak under 8 MiB (3 runs measured)" \
+	'[ "$gn" = 3 ] && [ "$gc" -lt 30 ] && [ "$gr" -lt 8192 ]' 'echo "$g"'
+window 3 18
+due
+read -r dsync dren dwr dran <<< "$(syscalls "$CU" fetch)"
+read -r isync iren iwr iran <<< "$(syscalls "$CU" fetch)"
+info "syscalls: a due fetch ${dsync} fsync, ${dren} rename, ${dwr} write; nothing due ${isync} fsync, ${iren} rename, ${iwr} write"
+chk "a run with nothing due writes nothing (no write, truncate, fsync or rename on any fd)" \
+	'[ "$iran" = 1 ] && [ "$isync" = 0 ] && [ "$iren" = 0 ] && [ "$iwr" = 0 ]'
+chk "a due fetch: two state writes (the record before the call, the result), no fsync" \
+	'[ "$dran" = 1 ] && [ "$dren" = 2 ] && [ "$dsync" = 0 ] && [ "$dwr" -gt 0 ]'
+sizes1=$(ux sh -c 'find ~/.local/state/claude-usage | wc -l')
+bytes=$(ux sh -c 'stat -c %s ~/.local/state/claude-usage/*/usage.json')
+chk "the state does not grow: the same files after 11 fetches, usage.json under 4 KiB" \
+	'[ "$sizes1" = "$sizes0" ] && [ "$bytes" -lt 4096 ]' 'echo "$sizes0 -> $sizes1 files, $bytes bytes"'
+info "per day with the timer and a valid token (2880 due runs): CPU about $((dc * 2880 / 1000)) s at most"
+
 echo "== 5. what needs root"
 r=$(x env HOME=$H1 CLAUDE_CONFIG_DIR=$H1/.claude "$CU" fetch 2>&1); rc=$?
 chk "as root (sudo -E style): refused, exit 1, one <4> line, nothing of root's in sbuser's home" \
