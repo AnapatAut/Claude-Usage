@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.1.2] - 2026-11-23
+
 ### Fixed
 - A curl older than 7.84 (Ubuntu 22.04, Debian 11, RHEL 8 and 9) leaves `%header{retry-after}`
   unexpanded. That was read as `no_curl` with no hold, though the call had been made: one call
