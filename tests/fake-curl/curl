@@ -110,7 +110,9 @@ html) printf '<html><body>moved</body></html>' && tail_ 200 "" ;;
 # Valid JSON padded past the 64 KiB cap, and just under it.
 bigjson) printf '{"pad":"%s",' "$(head -c 70000 /dev/zero | tr '\0' a)" && ok_body | cut -c2- && tail_ 200 "" ;;
 fitjson) printf '{"pad":"%s",' "$(head -c 60000 /dev/zero | tr '\0' a)" && ok_body | cut -c2- && tail_ 200 "" ;;
+# curl before 7.84: -w leaves %header{…} as it is.
 oldcurl) ok_body && printf '\n200 %%header{retry-after}' ;;
+oldcurl429) printf '{"error":{"type":"rate_limit_error"}}' && printf '\n429 %%header{retry-after}' ;;
 # As real curl does on a timeout: part of a body, the -w tail with status 000, exit 28.
 partial)
 	printf '{"five_hour":{"utiliz'

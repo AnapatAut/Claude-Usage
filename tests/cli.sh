@@ -235,6 +235,9 @@ mkstate() {
 		chmod 700 "$HOME/.local" "$HOME/.local/state" "$HOME/.local/state/claude-usage" "$(SD)"
 }
 state() { jq -r "$1" "$(SD)/usage.json" 2> /dev/null; }
+# The state file's and the lock file's identity, size and mtime (ns): unchanged when a run wrote
+# nothing.
+files_fp() { stat -c '%n %i %s %y' "$(SD)/usage.json" "$(SD)/.lock" 2> /dev/null; }
 stateq() { jq -e "$1" "$(SD)/usage.json" > /dev/null 2>&1; }
 state_edit() {
 	local f
@@ -600,11 +603,21 @@ case_http_errors() {
 	getj
 	ok "valid JSON just under 64 KiB: its numbers" 'called 1 && jqg ".error == null and .windows.five_hour.pct == 30.4"'
 	reset
+	# curl before 7.84 leaves %header{retry-after} unexpanded: the call was made, so its status
+	# counts. Before, this was no_curl with no hold: a call every 30 s that ignored 429s.
 	mode oldcurl
 	cu fetch
 	rc=$?
 	getj
-	ok "curl older than 7.84 (tail unexpanded): exit 0, no_curl" '[ "$rc" = 0 ] && called 1 && jqg ".error == \"no_curl\""'
+	ok "curl older than 7.84 (tail unexpanded): exit 0, one call, its numbers" '[ "$rc" = 0 ] && called 1 && jqg ".error == null and .windows.five_hour.pct == 30.4"'
+	mode oldcurl429
+	age 40
+	cu fetch
+	getj
+	ok "curl older than 7.84, a 429: rate_limited, the 60 s step (no Retry-After)" 'called 2 && jqg ".error == \"rate_limited\"" && gap 60 62'
+	age 40
+	cu fetch
+	ok "curl older than 7.84, a 429: no call during the backoff" 'called 2'
 	reset
 	mode partial
 	cu fetch
@@ -642,7 +655,7 @@ case_http_errors() {
 	early 4
 	cu fetch
 	good=1
-	for m in r401 r403 r500 partial html oldcurl x7; do
+	for m in r401 r403 r500 partial html x2 x7; do
 		mode ok
 		age 3700
 		cu fetch
@@ -686,6 +699,9 @@ case_credentials() {
 	rc=$?
 	getj
 	ok "no credentials file: exit 0, no call, no_credentials" '[ "$rc" = 0 ] && called 0 && jqg "$HIDDEN and .error == \"no_credentials\""'
+	m=$(spawned "$CU" get --refresh)
+	ok "no credentials file: no state folder made, and get --refresh starts nothing" \
+		'[ -z "$(ls -A "$HOME/.local/state/claude-usage" 2> /dev/null)" ] && [ "$m" = 0 ]'
 	reset
 	printf '{"mcpOAuth":{"srv|1":{"accessToken":"SECRET-MCP-ONE"}}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
 	cu fetch
@@ -926,6 +942,18 @@ case_accounts() {
 	rm -f "$CLAUDE_CONFIG_DIR/.credentials.json"
 	getj
 	ok "logout: numbers hidden" 'called 1 && jqg "$HIDDEN and .error == \"no_credentials\""'
+	age 40
+	cu fetch
+	g=$(gap 300 300 && echo held)
+	age 40
+	fp=$(files_fp)
+	cu fetch
+	ok "logout: recorded once, then held 5 min (no state write every 30 s)" \
+		'called 1 && [ "$(state .last_error)" = no_credentials ] && [ "$g" = held ] && [ -n "$fp" ] && [ "$(files_fp)" = "$fp" ]'
+	past_floor
+	cred SECRET-TOKEN-BBB
+	cu fetch
+	ok "logout, then a login: called at once (the new file ends the hold)" 'called 2 && [ "$(lastcall)" = SECRET-TOKEN-BBB ]'
 
 	reset
 	early 6
@@ -987,9 +1015,21 @@ case_config() {
 	past_floor
 	cu fetch
 	ok "no_curl: not checked again within the same window" 'called 0'
-	age_any 40
+	age 40
+	fp=$(files_fp)
 	cu fetch
-	ok "no_curl is checked again at the next boundary" 'called 1'
+	ok "no_curl: held 5 min (no state write every 30 s), not checked at the next boundary" \
+		'called 0 && [ "$(state .last_error)" = no_curl ] && [ -n "$fp" ] && [ "$(files_fp)" = "$fp" ]'
+	age 300
+	cu fetch
+	ok "no_curl is checked again after 5 min" 'called 1'
+	reset
+	chmod 620 "$HOME/.config/claude-usage/config"
+	cu fetch
+	chmod 600 "$HOME/.config/claude-usage/config"
+	age 11
+	"$CU" fetch --now 2>> "$STDERR"
+	ok "no_curl, then fixed: fetch --now looks again at once (the hold spaced out no call)" 'called 1'
 
 	reset
 	{
@@ -1289,9 +1329,9 @@ case_refresh() {
 	m2=$(spawned "$CU" get --refresh)
 	ok "none started while one runs" '[ "$m" = 0 ] && [ "$m2" = 0 ] && called 1'
 
-	# A fetch that runs no curl (no credentials): the pid count is exactly the one fetch.
+	# A fetch that runs no curl (no claudeAiOauth): the pid count is exactly the one fetch.
 	reset
-	rm -f "$CLAUDE_CONFIG_DIR/.credentials.json"
+	printf '{"mcpOAuth":{}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
 	m=$(spawned "$CU" get --refresh)
 	wait_for '[ -f "$(SD)/usage.json" ]' 5
 	ok "get --refresh: exactly one process, no thread" '[ "$m" = 1 ] && [ "$(state .last_error)" = no_credentials ]'
@@ -1816,6 +1856,17 @@ case_install() {
 	(cd / && "$T/rel/install.sh") > "$T/out" 2> "$T/err"
 	rc=$?
 	ok "install.sh with a file that does not match SHA256SUMS: refused, nothing installed" '[ "$rc" = 1 ] && says "do not match" && [ ! -e "$HOME/.local" ]'
+	# A sum given for a look-alike name only (. in a pattern would match _), and a malformed line.
+	cp "$CU" "$T/rel/claude-usage"
+	(cd "$T/rel" && sha256sum claude-usage > SHA256SUMS && printf '%s  install_sh\n' "$(sha256sum < install.sh | cut -d' ' -f1)" >> SHA256SUMS)
+	(cd / && "$T/rel/install.sh") > "$T/out" 2> "$T/err"
+	rc=$?
+	ok "install.sh: a sum for install_sh does not count for install.sh" '[ "$rc" = 1 ] && says "do not match" && [ ! -e "$HOME/.local" ]'
+	(cd "$T/rel" && sha256sum claude-usage install.sh > SHA256SUMS && echo 'not a sum line' >> SHA256SUMS)
+	(cd / && "$T/rel/install.sh") > "$T/out" 2> "$T/err"
+	rc=$?
+	ok "install.sh: a malformed SHA256SUMS line is refused (as --strict)" '[ "$rc" = 1 ] && says "malformed" && [ ! -e "$HOME/.local" ]'
+	(cd "$T/rel" && sha256sum claude-usage install.sh > SHA256SUMS)
 }
 
 # ---------------------------------------------------------------- run

@@ -1,7 +1,7 @@
 //! `fetch [--now]`: one call to the usage endpoint when due (design section 5).
 
 use crate::config;
-use crate::creds::{self, Creds};
+use crate::creds::{self, Creds, Seen};
 use crate::curl::{self, Ended};
 use crate::lock;
 use crate::parse::{self, Windows};
@@ -148,8 +148,11 @@ pub fn run(now_flag: bool) -> u8 {
     };
     let key = paths::key(&cfg);
     note.key = Some(key);
-    // Its own binary gone (an uninstall in progress): no new state folder.
-    let create = !matches!(paths::exe(), Exe::Deleted);
+    // No new state folder when its own binary is gone (an uninstall in progress), or when the
+    // credentials file is missing (a config folder never logged in, such as a temporary one:
+    // `get` says no_credentials from a stat alone).
+    let create =
+        !matches!(paths::exe(), Exe::Deleted) && !matches!(creds::look(&cfg), Seen::Missing);
     let folder = state::open_folder(
         &home,
         note.key.as_deref().unwrap_or(""),
@@ -176,7 +179,6 @@ pub fn run(now_flag: bool) -> u8 {
     }
     sys::deadline(DEADLINE);
     let now = crate::now();
-    lock::record(&lockf, std::process::id(), now);
     state::sweep_temps(&dir, now);
 
     let loaded = match state::read_file(&dir) {
@@ -269,6 +271,9 @@ pub fn run(now_flag: bool) -> u8 {
         return save(&dir, &st, &note);
     };
 
+    // Who holds the lock, for `status`: only now, when a call follows (a run that makes no
+    // call holds it for milliseconds and writes nothing).
+    lock::record(&lockf, std::process::id(), now);
     // The write-ahead record. If it cannot be written, no call: this is what stops a retry
     // storm when fetches are killed mid-call.
     st.pending = true;

@@ -168,10 +168,12 @@ fn look(home: &Path, cfg: &Path, now: i64, refresh: bool) -> (Shown, Option<(Pat
 }
 
 /// Who may run a writer (design section 5): not root, no setuid, `$HOME` and the credentials
-/// file the user's. (The state folder's owner was checked when it was opened.)
+/// file the user's. (The state folder's owner was checked when it was opened.) No credentials
+/// file: nothing to fetch.
 fn may_spawn(home: &Path, seen: &Seen) -> bool {
     let euid = sys::euid();
-    euid != 0
+    !matches!(seen, Seen::Missing)
+        && euid != 0
         && sys::ruid() == euid
         && sys::stat(home).is_ok_and(|st| st.is_dir() && st.uid == euid)
         && !matches!(seen, Seen::Present { uid, .. } if *uid != euid)

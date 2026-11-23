@@ -41,17 +41,18 @@ done < <(git ls-files -z)
 bash_syntax() { local f; for f in "${scripts[@]}"; do bash -n "$f" || return 1; done; }
 shellcheck_all() {
 	if command -v shellcheck > /dev/null; then
-		shellcheck -x -s bash -e SC2015 "${scripts[@]}"
+		shellcheck -x -e SC2015 "${scripts[@]}"
 	else
 		docker run --rm --network none --mount "type=bind,src=$PWD,dst=/mnt,readonly" -w /mnt \
-			"$SHELLCHECK_IMG" -x -s bash -e SC2015 "${scripts[@]}"
+			"$SHELLCHECK_IMG" -x -e SC2015 "${scripts[@]}"
 	fi
 }
 
 # Debug formatting could print a credential type: none in src/, except a line that says why
-# with "lint-allow: debug".
+# with "lint-allow: debug". Any spec ending in ? ({:?}, {x:#?}, {:>8?}); shellcheck reads each
+# script's own shebang (install.sh is sh, not bash).
 no_debug_format() {
-	! git grep -nE ':#?\?\}|dbg!\(' -- 'src/*.rs' | grep -v 'lint-allow: debug'
+	! git grep -nE '\{[A-Za-z0-9_.]*:[^{}]*\?\}|dbg!\(' -- 'src/*.rs' | grep -v 'lint-allow: debug'
 }
 
 check "cargo fmt" scripts/cargo fmt --check

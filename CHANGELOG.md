@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Fixed
+- A curl older than 7.84 (Ubuntu 22.04, Debian 11, RHEL 8 and 9) leaves `%header{retry-after}`
+  unexpanded. That was read as `no_curl` with no hold, though the call had been made: one call
+  every 30 s that never backed off on a 429. Its status now counts (a 429 backs off by the
+  usual steps, without Retry-After), and its numbers are shown.
+- `install.sh` checks `SHA256SUMS` without GNU-only options, so BusyBox (Alpine) works; as
+  strict as before (a malformed line, a missing or doubled file, a look-alike name: refused).
+
+### Changed
+- `no_curl`, `no_credentials` and `bad_credentials` hold the next look 5 min (a new
+  credentials file ends the hold at once; `fetch --now` may look again at once), instead of
+  rewriting the state every 30 s. After installing curl or fixing the config file, the timer
+  and `get --refresh` pick it up within 5 min.
+- A run that makes no call writes nothing: the lock file's holder line is written only before a
+  call.
+- No state folder for a config folder without a credentials file, and `get --refresh` starts no
+  fetch there (temporary config folders no longer leave folders behind).
+- The state is written without fsync: two small writes per fetch instead of two writes and four
+  fsyncs. A power cut can lose the last write; the worst case is one extra call.
+- Files are opened with `O_NOCTTY`.
+- README: a "Before you use it" section (not Anthropic's, the undocumented endpoint, the terms,
+  the timer's calls, one fetcher per account); no proxy; older curl; NixOS and Guix.
+- `sandbox/run.sh` measures the fetcher (section 4b): a due fetch with the real curl 20 ms,
+  CPU 10 ms, peak 12 MiB; a run with nothing due 1.6 MiB and no write, truncate, fsync or
+  rename on any fd; `get` 0.6 MiB; the state does not grow. A run that was not measured fails
+  the checks.
+- `tests/lint.sh`: shellcheck reads each script's shebang; any Debug format spec is caught.
+
 ## [0.1.1] - 2026-11-19
 
 ### Security

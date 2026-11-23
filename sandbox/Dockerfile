@@ -8,7 +8,7 @@
 # Pinned by digest (a re-pointed tag cannot swap it): the same ubuntu:24.04 as tests/cli.sh.
 FROM ubuntu@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      systemd systemd-sysv dbus dbus-user-session curl ca-certificates openssl nginx jq procps acl \
+      systemd systemd-sysv dbus dbus-user-session curl ca-certificates openssl nginx jq procps acl time strace \
     && rm -rf /var/lib/apt/lists/* \
     && systemctl mask systemd-sysctl.service systemd-udevd.service systemd-udevd-control.socket \
        systemd-udevd-kernel.socket systemd-modules-load.service systemd-remount-fs.service \

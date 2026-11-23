@@ -1,5 +1,5 @@
 //! The state: `$HOME/.local/state/claude-usage/<key>/usage.json`, its folders, and the refusal
-//! note. Every open, rename and fsync goes through folder fds (`O_NOFOLLOW` covers only the
+//! note. Every open and rename goes through folder fds (`O_NOFOLLOW` covers only the
 //! last component of a path; a check-then-open races).
 
 use crate::parse::{Window, Windows, pct_ok};
@@ -388,8 +388,14 @@ fn temp_name() -> io::Result<String> {
     Ok(s)
 }
 
-/// Writes `usage.json` atomically: a new temp file (O_EXCL, 0600) in the same folder, fsync,
-/// rename, fsync of the folder. On failure the temp file is removed.
+/// Writes `usage.json` atomically: a new temp file (O_EXCL, 0600) in the same folder, then
+/// rename. On failure the temp file is removed.
+/// No fsync: the timer writes twice every 30 s for hours, and the state is a cache. Readers see
+/// the old file or the new one, never a mix, and a killed fetch keeps its write-ahead record (the
+/// page cache survives a process). Only a crash of the whole machine (power cut, kernel panic,
+/// hard reset) can lose the last writes or leave an empty file; an empty or unreadable file is a
+/// new state, so the worst case is a few extra calls (a lost 429 backoff starts again at its
+/// first step).
 pub fn write_file(dir: &OwnedFd, bytes: &[u8]) -> io::Result<()> {
     let mut made = None;
     for _ in 0..16 {
@@ -414,15 +420,11 @@ pub fn write_file(dir: &OwnedFd, bytes: &[u8]) -> io::Result<()> {
     let mut f = File::from(fd);
     let r = f
         .write_all(bytes)
-        .and_then(|()| f.sync_all())
         .and_then(|()| sys::rename_at(dir.as_fd(), &name, "usage.json"));
     if r.is_err() {
         let _ = sys::unlink_at(dir.as_fd(), OsStr::new(&name));
-        return r;
     }
-    // The rename is done; a failed folder fsync loses durability on a crash only.
-    let _ = sys::fsync(dir.as_fd());
-    Ok(())
+    r
 }
 
 /// Removes temp files of `write_file` older than 60 s (left by a killed fetch).

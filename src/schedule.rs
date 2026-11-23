@@ -13,6 +13,9 @@ const NOW_SPAN: i64 = 600;
 /// The longest any wait lasts: a `next_attempt` further than this after the last attempt is
 /// capped (a corrupt or clock-jumped value).
 const MAX_WAIT: i64 = 3600;
+/// No call could be made (no curl, no or bad credentials): looked at again after this, or at
+/// once when the credentials file changes. Keeps a logged-out timer from writing every 30 s.
+const NO_CALL_HOLD: i64 = 300;
 /// A `last_attempt` further than this in the future is invalid.
 const FUTURE_SLACK: i64 = 60;
 
@@ -82,6 +85,14 @@ pub fn wait_until(s: &Sched, now: i64) -> Option<i64> {
     }
 }
 
+/// The hold of an attempt that could make no call.
+fn no_call_hold(s: &Sched) -> bool {
+    matches!(
+        s.last_error.as_deref(),
+        Some("no_curl" | "no_credentials" | "bad_credentials")
+    )
+}
+
 /// Past the 5 s floor (or no valid last attempt).
 pub fn past_floor(s: &Sched, now: i64) -> bool {
     last(s, now).is_none_or(|la| now >= la.saturating_add(FLOOR))
@@ -113,7 +124,9 @@ pub fn now_allowed(s: &Sched, now: i64) -> bool {
         if now < la.saturating_add(NOW_GAP) {
             return false;
         }
-        if wait_until(s, now).is_some_and(|na| now < na) {
+        // A no-call hold (no curl, no or bad credentials) made no call to space out: `--now`
+        // may look again at once, after the user fixed it.
+        if wait_until(s, now).is_some_and(|na| now < na) && !no_call_hold(s) {
             return false;
         }
     }
@@ -197,7 +210,9 @@ pub fn apply(s: &mut Sched, outcome: Outcome, la: i64) {
             s.next_attempt = Some(la.saturating_add(doubling(s.backoff_step, MAX_WAIT)));
         }
         Outcome::TokenExpired => s.next_attempt = Some(la.saturating_add(MAX_WAIT)),
-        Outcome::NoCurl | Outcome::NoCredentials | Outcome::BadCredentials => {}
+        Outcome::NoCurl | Outcome::NoCredentials | Outcome::BadCredentials => {
+            s.next_attempt = Some(la.saturating_add(NO_CALL_HOLD));
+        }
     }
 }
 
@@ -289,6 +304,24 @@ mod tests {
     }
 
     #[test]
+    fn no_call_hold() {
+        for o in [
+            Outcome::NoCurl,
+            Outcome::NoCredentials,
+            Outcome::BadCredentials,
+        ] {
+            let mut s = at(B);
+            apply(&mut s, o, B);
+            assert!(!due(&s, B + 40, false), "held past the next boundary");
+            assert!(due(&s, B + 40, true), "new credentials end the hold");
+            assert!(!due(&s, B + 299, false));
+            assert!(due(&s, B + 300, false), "looked at again after 5 min");
+            assert!(now_allowed(&s, B + 10), "--now looks again at once");
+            assert!(!now_allowed(&s, B + 9), "after the usual 10 s gap");
+        }
+    }
+
+    #[test]
     fn backoff_tables() {
         let rl = Outcome::RateLimited {
             until: None,
@@ -316,8 +349,9 @@ mod tests {
                 Some(300)
             ]
         );
-        assert_eq!(waits(Outcome::NoCurl, 3), vec![None, None, None]);
-        assert_eq!(waits(Outcome::BadCredentials, 2), vec![None, None]);
+        assert_eq!(waits(Outcome::NoCurl, 3), vec![Some(300); 3]);
+        assert_eq!(waits(Outcome::NoCredentials, 2), vec![Some(300); 2]);
+        assert_eq!(waits(Outcome::BadCredentials, 2), vec![Some(300); 2]);
     }
 
     #[test]

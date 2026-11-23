@@ -121,12 +121,15 @@ pub fn stat_at(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<Stat> {
 pub fn open(path: &Path, flags: libc::c_int) -> io::Result<OwnedFd> {
     let c = cstring(path.as_os_str())?;
     // SAFETY: a NUL-terminated path; no O_CREAT, so no mode argument is read.
-    let fd = retry(|| unsafe { libc::open(c.as_ptr(), flags | libc::O_CLOEXEC) })?;
+    // O_NOCTTY: a detached fetch is a session leader; a path that names a terminal must not
+    // become its controlling terminal.
+    let fd = retry(|| unsafe { libc::open(c.as_ptr(), flags | libc::O_CLOEXEC | libc::O_NOCTTY) })?;
     // SAFETY: open returned a new fd that nothing else owns.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// `openat` of a name in a folder, always close-on-exec. `mode` is used only with O_CREAT.
+/// `openat` of a name in a folder, always close-on-exec and O_NOCTTY. `mode` is used only with
+/// O_CREAT.
 pub fn open_at(
     dir: BorrowedFd<'_>,
     name: &str,
@@ -137,7 +140,12 @@ pub fn open_at(
     // SAFETY: a valid folder fd and a NUL-terminated name; the mode is passed as the variadic
     // argument openat reads with O_CREAT.
     let fd = retry(|| unsafe {
-        libc::openat(dir.as_raw_fd(), c.as_ptr(), flags | libc::O_CLOEXEC, mode)
+        libc::openat(
+            dir.as_raw_fd(),
+            c.as_ptr(),
+            flags | libc::O_CLOEXEC | libc::O_NOCTTY,
+            mode,
+        )
     })?;
     // SAFETY: openat returned a new fd that nothing else owns.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
