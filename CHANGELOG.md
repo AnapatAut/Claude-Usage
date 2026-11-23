@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Fixed
+- A usage window with `utilization: null`, or a window key left out, made the whole answer
+  `bad_response`: no new numbers (the last ones stayed, older and older). The endpoint's schema
+  allows both: that window is now `null` and the other one is shown. An answer with neither `five_hour` nor `seven_day` is
+  still `bad_response`.
+
+### Changed
+- README: what `fetched_at: null` and a `null` window mean, `pct` above 100, and Claude Code's
+  own calls to the endpoint.
+- Tests: new fake curl modes, and the sandbox's stand-in, send other keys of any kind beside
+  the two windows.
+
 ## [0.1.2] - 2026-11-23
 
 ### Fixed

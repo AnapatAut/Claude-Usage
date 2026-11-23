@@ -91,6 +91,24 @@ tail_() { printf '\n%s %s' "$1" "$2"; }
 case $mode in
 ok) ok_body && tail_ 200 "" ;;
 idle) printf '{"five_hour":{"utilization":0,"resets_at":null},"seven_day":null}' && tail_ 200 "" ;;
+# Shapes the endpoint's schema allows: utilization null; a window key missing; other keys of
+# any kind beside the two windows.
+nullutil)
+	printf '{"five_hour":{"utilization":null,"resets_at":"%s"},"seven_day":{"utilization":12,"resets_at":"%s"},"other_list":[]}' \
+		"$(iso '+2 hours')" "$(iso '+3 days')" && tail_ 200 ""
+	;;
+noseven) printf '{"five_hour":{"utilization":30.4,"resets_at":"%s"},"other_list":[]}' "$(iso '+2 hours')" && tail_ 200 "" ;;
+nofive) printf '{"seven_day":{"utilization":12,"resets_at":"%s"},"other_object":null}' "$(iso '+3 days')" && tail_ 200 "" ;;
+fullshape)
+	printf '{"five_hour":{"utilization":30.4,"resets_at":"%s"},"seven_day":{"utilization":12,"resets_at":"%s"},' \
+		"$(iso '+2 hours')" "$(iso '+3 days')"
+	printf '"other_null":null,"other_window":{"utilization":3,"resets_at":null},'
+	printf '"other_object":{"a":false,"b":null,"c":"x"},"other_list":[{"a":"k","b":5}]}'
+	tail_ 200 ""
+	;;
+# 200 with an object that has neither window key.
+emptyobj) printf '{}' && tail_ 200 "" ;;
+otheronly) printf '{"other_list":[],"other_object":null}' && tail_ 200 "" ;;
 slow) sleep 3 && ok_body && tail_ 200 "" ;;
 # A body that trickles out a byte every 0.1 s for a minute: only the watchdog ends it.
 trickle)

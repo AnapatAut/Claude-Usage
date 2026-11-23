@@ -137,6 +137,36 @@ to:     if !(1..=MAX_TOKEN).contains(&t.len()) {
 suite: cli credentials
 fails: token with CR/LF: exit 0, no call, bad_credentials
 
+# ---------------------------------------------------------------- the usage body
+
+name: utilization-null-refused
+file: src/parse.rs
+from:                 Value::Null | Value::String(_) => Some(None),
+to:                 Value::Null | Value::String(_) => None,
+suite: cli fetch_success
+fails: utilization null: that window null
+
+name: missing-window-refused
+file: src/parse.rs
+from:         seven_day: seven.map_or(Some(None), |w| window(w, now))?,
+to:         seven_day: window(seven?, now)?,
+suite: cli fetch_success
+fails: a window key missing: that window null
+
+name: missing-five-hour-refused
+file: src/parse.rs
+from:         five_hour: five.map_or(Some(None), |w| window(w, now))?,
+to:         five_hour: window(five?, now)?,
+suite: cli fetch_success
+fails: five_hour key missing: that window null
+
+name: no-window-key-accepted
+file: src/parse.rs
+from:     if five.is_none() && seven.is_none() {
+to:     if five.is_none() && seven.is_none() && false {
+suite: cli http_errors
+fails: {} with 200: bad_response
+
 # ---------------------------------------------------------------- the schedule and the state
 
 name: write-after-not-ahead
