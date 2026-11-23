@@ -38,9 +38,15 @@ claude-usage uninstall [--purge]              remove it (--purge: its state too)
 
 - `schema` is `0` while the interface is a draft, `1` once it is frozen. Refuse a schema you do
   not know; ignore keys you do not know.
-- `fetched_at` and `resets_at` are Unix seconds. A window the account does not report is `null`.
+- `fetched_at` and `resets_at` are Unix seconds. `resets_at` is `null` for a window that has not
+  started.
+- `fetched_at: null`: no numbers to show (never fetched yet, or hidden, see below). With
+  `fetched_at` set, a `null` window means the last good answer had no numbers for it (the
+  account does not report it, or the endpoint sent none).
+- `pct` is the endpoint's number as sent, usually 0 to 100: be ready for more.
 - `error` is `null` when the last attempt worked, else one fixed word (such as `rate_limited`,
-  `token_expired`, `account_changed`). Treat an unknown word as a generic error.
+  `token_expired`, `account_changed`). Treat an unknown word as a generic error. With an error,
+  the windows can still hold the last good numbers.
 - Numbers fetched with other credentials (another account, or before a logout) are never shown.
 
 ## Before you use it
@@ -56,7 +62,9 @@ claude-usage uninstall [--purge]              remove it (--purge: its state too)
 - With the timer, it makes one call every 30 s while your token is valid, also when nobody looks
   at the numbers (it stops when the token expires, a few hours after you last used Claude Code).
   Install with `--no-timer` to fetch only while a tool asks (`get --refresh`).
-- Run only one fetcher per account: two programs calling this endpoint get 429s.
+- Run only one fetcher per account: two programs calling this endpoint get 429s. Claude Code
+  itself also calls it now and then, so an occasional 429 is expected; `claude-usage` backs off
+  and keeps the last numbers.
 
 ## Requirements
 

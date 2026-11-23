@@ -404,6 +404,34 @@ case_fetch_success() {
 	cu fetch
 	getj
 	ok "an idle window (resets_at null) and an unreported one (null)" 'called 1 && jqg ".error == null and .fetched_at != null and .windows.five_hour == {\"pct\":0,\"resets_at\":null} and .windows.seven_day == null"'
+
+	# The shapes the endpoint's schema allows. Each fetch replaces the last numbers.
+	reset
+	early 8
+	cu fetch
+	mode nullutil
+	age 40
+	cu fetch
+	getj
+	ok "utilization null: that window null, the other shown, no error" 'called 2 && jqg ".error == null and .fetched_at != null and .windows.five_hour == null and .windows.seven_day.pct == 12"'
+	reset
+	early 4
+	mode noseven
+	cu fetch
+	getj
+	ok "a window key missing: that window null, the other shown, no error" 'called 1 && jqg ".error == null and .windows.five_hour.pct == 30.4 and .windows.seven_day == null"'
+	reset
+	early 4
+	mode nofive
+	cu fetch
+	getj
+	ok "five_hour key missing: that window null, seven_day shown, no error" 'called 1 && jqg ".error == null and .windows.five_hour == null and .windows.seven_day.pct == 12"'
+	reset
+	early 4
+	mode fullshape
+	cu fetch
+	getj
+	ok "other keys of any kind beside the two windows: ignored" 'called 1 && jqg ".error == null and .windows.five_hour.pct == 30.4 and .windows.seven_day.pct == 12"'
 }
 
 case_rate_limited() {
@@ -592,6 +620,16 @@ case_http_errors() {
 	cu fetch
 	getj
 	ok "HTML with 200: bad_response, backoff 60 s" 'called 1 && jqg ".error == \"bad_response\"" && gap 60 62'
+	reset
+	mode emptyobj
+	cu fetch
+	getj
+	ok "{} with 200: bad_response (neither window key)" 'called 1 && jqg ".error == \"bad_response\""'
+	reset
+	mode otheronly
+	cu fetch
+	getj
+	ok "only other keys with 200: bad_response" 'called 1 && jqg ".error == \"bad_response\""'
 	reset
 	mode bigjson
 	cu fetch

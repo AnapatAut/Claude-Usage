@@ -28,18 +28,26 @@ pub fn pct_ok(n: &Number) -> bool {
         .is_some_and(|f| f.is_finite() && (0.0..=1000.0).contains(&f))
 }
 
-/// A 200 body: an object with `five_hour` and `seven_day`, each `null` or
-/// `{utilization, resets_at}`; other keys are ignored. None: `bad_response`.
+/// A 200 body: an object with `five_hour` or `seven_day` or both, each `null` or
+/// `{utilization, resets_at}` (extra keys in it ignored); a missing one counts as `null`, other
+/// keys are ignored. None: `bad_response`: not an object, neither key (so `{}` or an error
+/// object never reads as "no windows"), or a malformed window: one bad window fails the whole
+/// body.
 pub fn usage(body: &[u8], now: i64) -> Option<Windows> {
     let v: Value = serde_json::from_slice(body).ok()?;
     let m = v.as_object()?;
+    let (five, seven) = (m.get("five_hour"), m.get("seven_day"));
+    if five.is_none() && seven.is_none() {
+        return None;
+    }
     Some(Windows {
-        five_hour: window(m.get("five_hour")?, now)?,
-        seven_day: window(m.get("seven_day")?, now)?,
+        five_hour: five.map_or(Some(None), |w| window(w, now))?,
+        seven_day: seven.map_or(Some(None), |w| window(w, now))?,
     })
 }
 
-/// Outer None: not a valid window. Some(None): `null`.
+/// Outer None: not a valid window. Some(None): `null`, or `utilization: null` (no numbers;
+/// `resets_at` must still be a string or `null`, and is not read).
 fn window(v: &Value, now: i64) -> Option<Option<Window>> {
     let o = match v {
         Value::Null => return Some(None),
@@ -48,6 +56,12 @@ fn window(v: &Value, now: i64) -> Option<Option<Window>> {
     };
     let pct = match o.get("utilization")? {
         Value::Number(n) if pct_ok(n) => n.clone(),
+        Value::Null => {
+            return match o.get("resets_at")? {
+                Value::Null | Value::String(_) => Some(None),
+                _ => None,
+            };
+        }
         _ => return None,
     };
     let resets_at = match o.get("resets_at")? {
@@ -290,12 +304,61 @@ mod tests {
         assert_eq!(idle, Windows::default());
     }
 
+    /// The shapes the endpoint's schema allows: `utilization: null`, a window key missing,
+    /// extra keys in a window.
+    #[test]
+    fn usage_nullish() {
+        let seven = r#"{"utilization":12,"resets_at":null}"#;
+        // five_hour `null` in each: no numbers; seven_day's numbers shown.
+        for five in [
+            r#","five_hour":{"utilization":null,"resets_at":null}"#,
+            r#","five_hour":{"utilization":null,"resets_at":"2026-11-17T07:25:00Z"}"#,
+            r#","five_hour":{"utilization":null,"resets_at":"not a time"}"#,
+            r#","other_list":[],"other_object":null"#,
+        ] {
+            let body = format!(r#"{{"seven_day":{seven}{five}}}"#);
+            let w = usage(body.as_bytes(), T).unwrap_or_else(|| panic!("valid: {body}"));
+            assert_eq!(w.five_hour, None, "{body}");
+            assert_eq!(
+                w.seven_day.as_ref().map(|s| s.pct.to_string()),
+                Some("12".into()),
+                "{body}"
+            );
+        }
+        let only_five = usage(
+            br#"{"five_hour":{"utilization":30.4,"resets_at":null,"extra":{"x":1}}}"#,
+            T,
+        )
+        .expect("valid");
+        assert_eq!(
+            only_five.five_hour.map(|f| f.pct.to_string()),
+            Some("30.4".into())
+        );
+        assert_eq!(only_five.seven_day, None);
+        let both_null_util = usage(
+            br#"{"five_hour":{"utilization":null,"resets_at":null},"seven_day":{"utilization":null,"resets_at":null}}"#,
+            T,
+        );
+        assert_eq!(both_null_util, Some(Windows::default()));
+        assert_eq!(usage(br#"{"five_hour":null}"#, T), Some(Windows::default()));
+    }
+
     #[test]
     fn usage_refusals() {
         for b in [
             &br#"{"error":{"type":"rate_limit_error"}}"#[..],
-            br#"{"five_hour":null}"#,
+            br#"{}"#,
+            br#"{"other_list":[],"other_object":null,"other_null":null}"#,
+            br#"{"five_hour":{"utilization":1,"resets_at":"soon"},"seven_day":null}"#,
             br#"{"five_hour":null,"seven_day":3}"#,
+            br#"{"five_hour":"x"}"#,
+            br#"{"seven_day":[]}"#,
+            br#"{"five_hour":{"resets_at":null},"seven_day":null}"#,
+            br#"{"five_hour":{"utilization":null},"seven_day":null}"#,
+            br#"{"five_hour":{"utilization":null,"resets_at":5},"seven_day":null}"#,
+            br#"{"five_hour":{"utilization":null,"resets_at":{}},"seven_day":null}"#,
+            br#"{"five_hour":null,"seven_day":{"utilization":null,"resets_at":false}}"#,
+            br#"{"five_hour":{"utilization":true,"resets_at":null},"seven_day":null}"#,
             br#"{"five_hour":{"utilization":"5","resets_at":null},"seven_day":null}"#,
             br#"{"five_hour":{"utilization":-1,"resets_at":null},"seven_day":null}"#,
             br#"{"five_hour":{"utilization":1000.5,"resets_at":null},"seven_day":null}"#,
