@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.1.3] - 2026-11-23
+
 ### Fixed
 - A usage window with `utilization: null`, or a window key left out, made the whole answer
   `bad_response`: no new numbers (the last ones stayed, older and older). The endpoint's schema
