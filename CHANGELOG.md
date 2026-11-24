@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.1.4] - 2026-11-24
+
 ### Fixed
 - `get` showed a window whose reset time had come: numbers of a window that had already ended.
   This happened after a long error (such as `token_expired`), with `--no-timer` when nothing
