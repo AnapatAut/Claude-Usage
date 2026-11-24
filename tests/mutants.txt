@@ -186,6 +186,41 @@ to:     let visible = has_numbers && current == s.attempt_stamp.as_deref();
 suite: cli accounts
 fails: switch then SIGKILL mid-call: old numbers never shown
 
+name: reset-window-shown
+file: src/get.rs
+from:     w.filter(|w| w.resets_at.is_none_or(|r| r > now)).cloned()
+to:     w.cloned()
+suite: cli fetch_success
+fails: the stored reset time passes later
+
+name: reset-boundary-shown
+file: src/get.rs
+from:     w.filter(|w| w.resets_at.is_none_or(|r| r > now)).cloned()
+to:     w.filter(|w| w.resets_at.is_none_or(|r| r >= now)).cloned()
+suite: unit
+fails: get::tests::a_window_that_has_reset_is_null
+
+name: seven-day-reset-shown
+file: src/get.rs
+from:                 seven_day: current_window(s.windows.seven_day.as_ref(), now),
+to:                 seven_day: s.windows.seven_day.clone(),
+suite: unit
+fails: get::tests::a_window_that_has_reset_is_null
+
+name: status-ended-unnamed
+file: src/status.rs
+from:     .filter(|(_, stored, printed)| stored.is_some() && printed.is_none())
+to:     .filter(|_| false)
+suite: cli fetch_success
+fails:   status names the window that has reset
+
+name: not-started-hidden
+file: src/get.rs
+from:     w.filter(|w| w.resets_at.is_none_or(|r| r > now)).cloned()
+to:     w.filter(|w| w.resets_at.is_some_and(|r| r > now)).cloned()
+suite: cli fetch_success
+fails: an idle window (resets_at null)
+
 name: account-changed-unmasked
 file: src/get.rs
 from:     if has_numbers && !visible {

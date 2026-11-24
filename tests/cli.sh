@@ -432,6 +432,28 @@ case_fetch_success() {
 	cu fetch
 	getj
 	ok "other keys of any kind beside the two windows: ignored" 'called 1 && jqg ".error == null and .windows.five_hour.pct == 30.4 and .windows.seven_day.pct == 12"'
+
+	# A window whose reset time has come: its numbers belong to an ended window.
+	reset
+	early 4
+	mode ended
+	cu fetch
+	getj
+	ok "a window sent with its reset time past: null, the other shown, no error" 'called 1 && jqg ".error == null and .fetched_at != null and .windows.five_hour == null and .windows.seven_day.pct == 12"'
+	reset
+	early 4
+	cu fetch
+	state_edit '.windows.five_hour.resets_at = (now | floor) - 3600'
+	getj
+	ok "the stored reset time passes later: that window null, the other shown" 'called 1 && jqg ".error == null and .fetched_at != null and .windows.five_hour == null and .windows.seven_day.pct == 12"'
+	ok "  get changes nothing stored: the numbers stay for the next fetch to replace" 'jqf ".windows.five_hour.pct == 30.4" "$(SD)/usage.json"'
+	"$CU" status > "$T/out.status" 2>> "$STDERR"
+	ok "  status names the window that has reset" 'grep -qx "get shows: *error none, numbers shown (ended, shown null: five_hour)" "$T/out.status"'
+	state_edit '.windows.five_hour.resets_at = (now | floor) + 3600'
+	getj
+	ok "  a reset time still ahead: shown" 'jqg ".windows.five_hour.pct == 30.4"'
+	"$CU" status > "$T/out.status" 2>> "$STDERR"
+	ok "  status then names none" 'grep -qx "get shows: *error none, numbers shown" "$T/out.status"'
 }
 
 case_rate_limited() {

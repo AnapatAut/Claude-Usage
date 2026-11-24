@@ -42,11 +42,12 @@ claude-usage uninstall [--purge]              remove it (--purge: its state too)
   started.
 - `fetched_at: null`: no numbers to show (never fetched yet, or hidden, see below). With
   `fetched_at` set, a `null` window means the last good answer had no numbers for it (the
-  account does not report it, or the endpoint sent none).
+  account does not report it, or the endpoint sent none), or its reset time has come (its
+  numbers belong to an ended window; the next good fetch brings the new ones).
 - `pct` is the endpoint's number as sent, usually 0 to 100: be ready for more.
 - `error` is `null` when the last attempt worked, else one fixed word (such as `rate_limited`,
   `token_expired`, `account_changed`). Treat an unknown word as a generic error. With an error,
-  the windows can still hold the last good numbers.
+  the windows can still hold the last good numbers (those whose reset time has not come).
 - Numbers fetched with other credentials (another account, or before a logout) are never shown.
 
 ## Before you use it

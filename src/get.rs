@@ -4,7 +4,7 @@
 use crate::creds::{self, Seen};
 use crate::detach;
 use crate::lock::{self, Holder};
-use crate::parse::Windows;
+use crate::parse::{Window, Windows};
 use crate::paths::{self, ConfigError, Exe};
 use crate::schedule;
 use crate::state::{self, Access, Loaded, Problem, Sched, State};
@@ -80,11 +80,20 @@ pub fn evaluate(state: Option<&State>, creds: &Seen, lock_free: bool, now: i64) 
             s.sched.last_error.clone()
         },
         windows: if visible {
-            s.windows.clone()
+            Windows {
+                five_hour: current_window(s.windows.five_hour.as_ref(), now),
+                seven_day: current_window(s.windows.seven_day.as_ref(), now),
+            }
         } else {
             Windows::default()
         },
     }
+}
+
+/// A window whose reset time has come is shown as `null`: its numbers belong to a window that
+/// has ended. One that has not started (`resets_at` null) is shown as it is.
+fn current_window(w: Option<&Window>, now: i64) -> Option<Window> {
+    w.filter(|w| w.resets_at.is_none_or(|r| r > now)).cloned()
 }
 
 pub fn run(refresh: bool) -> u8 {
@@ -200,7 +209,6 @@ fn spawn_due(loaded: &Loaded, seen: &Seen, now: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::Window;
 
     const NOW: i64 = 1_794_893_100;
 
@@ -285,6 +293,37 @@ mod tests {
         let v = evaluate(Some(&s), &at("1:1:1:1:1"), true, NOW);
         assert_eq!(v, Shown::hidden("no_credentials"));
         assert_eq!(evaluate(None, &at("1:1:1:1:1"), true, NOW).error, None);
+    }
+
+    #[test]
+    fn a_window_that_has_reset_is_null() {
+        let w = |resets_at| {
+            Some(Window {
+                pct: 12.into(),
+                resets_at,
+            })
+        };
+        let mut s = with_numbers();
+        let shown = |s: &State| evaluate(Some(s), &at("1:2:3:4:5"), true, NOW).windows;
+        // Not started: shown as it is.
+        assert_eq!(shown(&s).five_hour, w(None));
+        s.windows.five_hour = w(Some(NOW + 1));
+        assert_eq!(shown(&s).five_hour, w(Some(NOW + 1)));
+        // Its reset time has come: null, at the second and after.
+        s.windows.five_hour = w(Some(NOW));
+        assert_eq!(shown(&s).five_hour, None);
+        s.windows.five_hour = w(Some(NOW - 3600));
+        assert_eq!(shown(&s).five_hour, None);
+        // Per window; fetched_at and the error stay as they are.
+        s.windows.seven_day = w(Some(NOW + 86_400));
+        s.sched.last_error = Some("token_expired".into());
+        let v = evaluate(Some(&s), &at("1:2:3:4:5"), true, NOW);
+        assert_eq!(v.fetched_at, Some(NOW - 100));
+        assert_eq!(v.error.as_deref(), Some("token_expired"));
+        assert_eq!(v.windows.five_hour, None);
+        assert_eq!(v.windows.seven_day, w(Some(NOW + 86_400)));
+        s.windows.seven_day = w(Some(NOW));
+        assert_eq!(shown(&s), Windows::default());
     }
 
     #[test]
