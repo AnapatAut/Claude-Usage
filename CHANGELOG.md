@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+- `get` showed a window whose reset time had come: numbers of a window that had already ended.
+  This happened after a long error (such as `token_expired`), with `--no-timer` when nothing
+  had asked for a fetch for hours, or when the endpoint sent such a window. That window is now
+  `null` until the next good fetch; a window that has not started (`resets_at: null`) is shown
+  as before. The stored numbers are not changed. `status` names such windows.
+
+### Changed
+- README: a `null` window can also mean its reset time has come.
+- Tests: the sandbox's stand-in sends reset times in 2090, not 2030.
+
 ## [0.1.3] - 2026-11-23
 
 ### Fixed

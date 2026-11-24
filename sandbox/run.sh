@@ -293,7 +293,7 @@ cu fetch; rc=$?
 getj
 L=$(lastline)
 chk "fetch through the real curl: exit 0, one call, the numbers" \
-	'[ "$rc" = 0 ] && [ "$(calls)" = 1 ] && jqg ".error == null and .windows.five_hour == {\"pct\":30.4,\"resets_at\":1893456000} and .windows.seven_day.pct == 12"' 'echo "$G"; x cat /var/log/stub.log'
+	'[ "$rc" = 0 ] && [ "$(calls)" = 1 ] && jqg ".error == null and .windows.five_hour == {\"pct\":30.4,\"resets_at\":3786912000} and .windows.seven_day.pct == 12"' 'echo "$G"; x cat /var/log/stub.log'
 chk "the request: HTTP/2, GET /api/oauth/usage, the token as one Bearer header, the beta header" \
 	'[ "$(echo "$L" | cut -d"|" -f1-6)" = "HTTP/2.0|GET|/api/oauth/usage|Bearer SECRET-TOKEN-SBX|oauth-2025-04-20|-" ]' 'echo "$L"'
 chk "no config file: status names the system curl" 'cu status | grep -qx "curl: *\/usr\/bin\/curl"' 'cu status'

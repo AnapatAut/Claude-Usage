@@ -106,6 +106,11 @@ fullshape)
 	printf '"other_object":{"a":false,"b":null,"c":"x"},"other_list":[{"a":"k","b":5}]}'
 	tail_ 200 ""
 	;;
+# five_hour's reset time already past when it is sent.
+ended)
+	printf '{"five_hour":{"utilization":30.4,"resets_at":"%s"},"seven_day":{"utilization":12,"resets_at":"%s"}}' \
+		"$(iso '-1 minute')" "$(iso '+3 days')" && tail_ 200 ""
+	;;
 # 200 with an object that has neither window key.
 emptyobj) printf '{}' && tail_ 200 "" ;;
 otheronly) printf '{"other_list":[],"other_object":null}' && tail_ 200 "" ;;

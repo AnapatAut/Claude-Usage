@@ -145,14 +145,28 @@ fn report(o: &mut String, now: i64) {
         }
     };
     let shown = get::evaluate(Some(s), &seen, lock_free, now);
+    // Windows get shows as null because their reset time has come.
+    let ended: Vec<&str> = [
+        ("five_hour", &s.windows.five_hour, &shown.windows.five_hour),
+        ("seven_day", &s.windows.seven_day, &shown.windows.seven_day),
+    ]
+    .into_iter()
+    .filter(|(_, stored, printed)| stored.is_some() && printed.is_none())
+    .map(|(name, _, _)| name)
+    .collect();
     let _ = writeln!(
         o,
-        "get shows:      error {}, numbers {}",
+        "get shows:      error {}, numbers {}{}",
         shown.error.as_deref().unwrap_or("none"),
         if shown.fetched_at.is_some() {
             "shown"
         } else {
             "hidden"
+        },
+        if shown.fetched_at.is_some() && !ended.is_empty() {
+            format!(" (ended, shown null: {})", ended.join(", "))
+        } else {
+            String::new()
         }
     );
     match s.fetched_at {
